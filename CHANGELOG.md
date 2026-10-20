@@ -9,6 +9,8 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-20
+
 ### Added
 
 - Initial release.
