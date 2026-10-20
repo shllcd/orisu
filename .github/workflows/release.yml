@@ -1,0 +1,236 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Require default branch
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Releases run from ${{ github.event.repository.default_branch }} only"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bump version and changelog
+        id: version
+        run: |
+          version=$(node .github/scripts/release.mjs version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Create release patch
+        run: git diff > release.patch
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-patch
+          path: |
+            release.patch
+            notes.md
+          retention-days: 1
+          if-no-files-found: error
+
+  verify:
+    name: Verify
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lint
+        run: cargo clippy --workspace -- -D warnings
+      - name: Generated files
+        run: cargo xtask codegen --check
+      - name: Typecheck
+        working-directory: packages/orisu
+        run: |
+          npm install --ignore-scripts --omit=optional
+          npm run typecheck
+
+  build-native:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.host }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            zig: true
+            glibc: .2.17
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            zig: true
+            glibc: .2.17
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            zig: true
+            rustflags: -C target-feature=-crt-static
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            zig: true
+            rustflags: -C target-feature=-crt-static
+          - host: macos-latest
+            target: aarch64-apple-darwin
+          - host: macos-latest
+            target: x86_64-apple-darwin
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+          - host: windows-latest
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: matrix.zig
+        with:
+          version: 0.15.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        if: matrix.zig
+        with:
+          tool: cargo-zigbuild
+      - name: Add Rust target
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo ${{ matrix.zig && 'zigbuild' || 'build' }} --release -p orisu_napi --target ${{ matrix.target }}${{ matrix.glibc }}
+      - name: Stage binding
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            *windows*) library=orisu_napi.dll ;;
+            *darwin*) library=liborisu_napi.dylib ;;
+            *) library=liborisu_napi.so ;;
+          esac
+          mkdir -p bindings
+          cp "target/${{ matrix.target }}/release/$library" "bindings/orisu.${{ matrix.target }}.node"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bindings-${{ matrix.target }}
+          path: bindings/orisu.${{ matrix.target }}.node
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs: [prepare, verify, build-native]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Update npm for trusted publishing
+        run: npm install -g npm@11
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-patch
+      - name: Apply release patch
+        run: git apply release.patch
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bindings-*
+          path: artifacts
+      - name: Build package
+        working-directory: packages/orisu
+        run: |
+          npm install --ignore-scripts --omit=optional
+          npm run build
+      - name: Stage native packages
+        run: node .github/scripts/release.mjs packages
+      - name: Publish native packages
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          for dir in dist/npm/*; do
+            name=$(node -p "require('./$dir/package.json').name")
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already published"
+            else
+              (cd "$dir" && npm publish --access public --provenance)
+            fi
+          done
+      - name: Publish
+        working-directory: packages/orisu
+        run: npm publish --access public --provenance
+
+  release:
+    name: Commit, tag and release
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-patch
+      - name: Apply release patch
+        run: git apply --index release.patch
+      - name: Commit and tag
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "release: v$VERSION"
+          git tag "v$VERSION"
+      - name: Push
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}" --tags
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md
+      # The extensions.toml entry must list `version` before `path`; the action only matches it there.
+      - name: Publish Zed extension
+        uses: huacnlee/zed-extension-action@8cd592a0d24e1e41157740f1a529aeabddc88a1b # v2.0.0
+        with:
+          extension-name: orisu
+          tag: v${{ needs.prepare.outputs.version }}
+          push-to: shllcd/extensions
+        env:
+          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}

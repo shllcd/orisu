@@ -1,0 +1,20 @@
+[package]
+name = "orisu_compat_tailwind"
+description = "Tailwind CSS 4.3.3 compatibility: built-in stylesheets, legacy utilities and v3 `theme()` paths."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+orisu_allocator.workspace = true
+orisu_ast.workspace = true
+orisu_candidate.workspace = true
+orisu_compiler.workspace = true
+orisu_parser.workspace = true
+orisu_registry.workspace = true
+orisu_theme.workspace = true
+indexmap.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true

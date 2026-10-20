@@ -1,0 +1,45 @@
+[workspace]
+members = ["crates/*", "xtask"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+orisu_allocator = { path = "crates/orisu_allocator" }
+orisu_ast = { path = "crates/orisu_ast" }
+orisu_parser = { path = "crates/orisu_parser" }
+orisu_theme = { path = "crates/orisu_theme" }
+orisu_candidate = { path = "crates/orisu_candidate" }
+orisu_registry = { path = "crates/orisu_registry" }
+orisu_optimizer = { path = "crates/orisu_optimizer" }
+orisu_compiler = { path = "crates/orisu_compiler" }
+orisu_canonical = { path = "crates/orisu_canonical" }
+orisu_merge = { path = "crates/orisu_merge" }
+orisu_scanner = { path = "crates/orisu_scanner" }
+orisu_ignore = { path = "crates/orisu_ignore" }
+orisu_diagnostics = { path = "crates/orisu_diagnostics" }
+orisu_compat_tailwind = { path = "crates/orisu_compat_tailwind" }
+orisu_lsp = { path = "crates/orisu_lsp" }
+bumpalo = { version = "3.20", features = ["collections"] }
+indexmap = "2"
+rustc-hash = "2"
+hashbrown = "0.16"
+foldhash = "0.2"
+memchr = "2"
+smallvec = { version = "1.15", features = ["union", "const_generics"] }
+rayon = "1"
+blake3 = "1"
+globset = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+debug = false
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

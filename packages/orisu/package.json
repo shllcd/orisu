@@ -1,0 +1,79 @@
+{
+  "name": "orisu",
+  "version": "0.1.0",
+  "description": "Atomic CSS engine compatible with Tailwind CSS 4",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shllcd/orisu.git",
+    "directory": "packages/orisu"
+  },
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "bin": {
+    "orisu": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "presets",
+    "skills",
+    "orisu.*.node"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./cn": {
+      "types": "./dist/cn.d.ts",
+      "default": "./dist/cn.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "default": "./dist/vite.js"
+    },
+    "./presets/*.css": {
+      "style": "./presets/*.css",
+      "default": "./presets/*.css"
+    }
+  },
+  "imports": {
+    "#merge-table": {
+      "types": "./dist/merge-table.d.ts",
+      "default": "./dist/merge-table.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-presets.ts",
+    "build:native": "node scripts/build-native.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "optionalDependencies": {
+    "@orisu/binding-darwin-arm64": "0.1.0",
+    "@orisu/binding-darwin-x64": "0.1.0",
+    "@orisu/binding-linux-arm64-gnu": "0.1.0",
+    "@orisu/binding-linux-arm64-musl": "0.1.0",
+    "@orisu/binding-linux-x64-gnu": "0.1.0",
+    "@orisu/binding-linux-x64-musl": "0.1.0",
+    "@orisu/binding-win32-arm64-msvc": "0.1.0",
+    "@orisu/binding-win32-x64-msvc": "0.1.0"
+  },
+  "peerDependencies": {
+    "lightningcss": "^1.30.0",
+    "vite": "^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "lightningcss": {
+      "optional": true
+    },
+    "vite": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "lightningcss": "^1.30.0",
+    "typescript": "^7.0.0",
+    "vite": "^6.0.0 || ^7.0.0"
+  }
+}

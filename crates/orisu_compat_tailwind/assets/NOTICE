@@ -1,0 +1,3 @@
+index.css, preflight.css, theme.css and utilities.css are copied verbatim from
+tailwindcss 4.3.3 (https://github.com/tailwindlabs/tailwindcss) and are
+distributed under the MIT License in LICENSE-tailwindcss.

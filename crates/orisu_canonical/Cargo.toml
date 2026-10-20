@@ -1,0 +1,19 @@
+[package]
+name = "orisu_canonical"
+description = "Rewrites candidates to their canonical, shortest equivalent form."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+orisu_allocator.workspace = true
+orisu_ast.workspace = true
+orisu_candidate.workspace = true
+orisu_compiler.workspace = true
+orisu_parser.workspace = true
+orisu_registry.workspace = true
+orisu_theme.workspace = true
+indexmap.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "orisu_ast"
+description = "CSS syntax tree, walkers and printer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+orisu_allocator.workspace = true

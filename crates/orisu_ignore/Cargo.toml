@@ -1,0 +1,28 @@
+[package]
+name = "orisu_ignore"
+version = "0.4.24"
+description = "Fork of the ignore crate (ripgrep) with in-memory gitignore support, as vendored by tailwindcss-oxide."
+license = "Unlicense OR MIT"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "orisu_ignore"
+bench = false
+
+[dependencies]
+crossbeam-deque = "0.8.3"
+globset.workspace = true
+log = "0.4.20"
+memchr.workspace = true
+same-file = "1.0.6"
+walkdir = "2.4.0"
+dunce = "1.0.5"
+
+[dependencies.regex-automata]
+version = "0.4.0"
+default-features = false
+features = ["std", "perf", "syntax", "meta", "nfa", "hybrid", "dfa-onepass"]
+
+[target.'cfg(windows)'.dependencies.winapi-util]
+version = "0.1.2"

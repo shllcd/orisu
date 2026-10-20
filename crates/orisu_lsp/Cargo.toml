@@ -1,0 +1,28 @@
+[package]
+name = "orisu_lsp"
+description = "Language server for orisu: completions, hover, diagnostics, quick fixes and colors for utility classes."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orisu-lsp"
+path = "src/main.rs"
+
+[dependencies]
+orisu_allocator.workspace = true
+orisu_ast.workspace = true
+orisu_parser.workspace = true
+orisu_compiler.workspace = true
+orisu_compat_tailwind.workspace = true
+orisu_canonical.workspace = true
+orisu_scanner.workspace = true
+orisu_ignore.workspace = true
+orisu_diagnostics.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+crossbeam-channel = "0.5"
+lsp-server = "0.10"
+lsp-types = "0.97"

@@ -1,0 +1,15 @@
+[package]
+name = "orisu_theme"
+description = "Theme variables: namespaces, resolution and used-variable tracking."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+orisu_allocator.workspace = true
+orisu_ast.workspace = true
+orisu_parser.workspace = true
+indexmap.workspace = true
+rustc-hash.workspace = true
+smallvec.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "orisu_allocator"
+description = "Arenas and interners shared by the orisu crates."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bumpalo.workspace = true
+rustc-hash.workspace = true
