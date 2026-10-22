@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { gzipSync } from "node:zlib";
 
 const [work, command, scenario, k, mode] = process.argv.slice(2);
 const { entry, root, modules, orisu } = JSON.parse(readFileSync(join(work, "config.json"), "utf8"));
@@ -76,7 +77,8 @@ const prepare = async () => {
   const hmrFile = orisu.files.find((file) => file.endsWith(".tsx") && readFileSync(file, "utf8").includes("className=\""));
   if (!hmrFile) throw new Error("no .tsx file with className=\" to edit");
   const calls = cnCalls();
-  writeFileSync(join(work, "data.json"), JSON.stringify({ candidates: orisu.candidates, cn: calls, hmrFile }));
+  const mergeTable = (await (await engines.orisu()).compile()).mergeTable(orisu.candidates);
+  writeFileSync(join(work, "data.json"), JSON.stringify({ candidates: orisu.candidates, cn: calls, hmrFile, mergeTable }));
   process.stdout.write(
     `${orisu.files.length} files, ${orisu.candidates.length} candidates, ${orisu.css.length} bytes of identical CSS, ` +
       `${calls.length} cn calls (${new Set(calls).size} distinct)\n`,
@@ -87,7 +89,7 @@ const run = async (impl) => {
   const K = Number(k);
   const { candidates, cn: calls, hmrFile } = JSON.parse(readFileSync(join(work, "data.json"), "utf8"));
   const hmrSource = readFileSync(hmrFile, "utf8");
-  const engine = await engines[impl]();
+  const engine = impl === "cn" ? null : await engines[impl]();
   let seed = 7;
   const pick = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff), candidates[seed % candidates.length]);
   const cnOf = async () => {
@@ -96,6 +98,7 @@ const run = async (impl) => {
       const { clsx } = require("clsx");
       return (...args) => twMerge(clsx(args));
     }
+    if (impl === "cn") return require("cn").cn;
     const { cn, registerMergeTable } = await import(join(orisu, "cn.js"));
     registerMergeTable((await engine.compile()).mergeTable(candidates));
     return cn;
@@ -185,12 +188,50 @@ const run = async (impl) => {
     },
   };
 
+  gc();
+  const heap = process.memoryUsage().heapUsed;
   const measured = await scenarios[scenario]();
-  if (mode === "1") {
-    const start = process.hrtime.bigint();
-    await measured();
-    process.stdout.write(`${Number(process.hrtime.bigint() - start) / 1e6}\n`);
-  }
+  const start = process.hrtime.bigint();
+  if (mode === "1") await measured();
+  const ms = Number(process.hrtime.bigint() - start) / 1e6;
+  gc();
+  const retained = process.memoryUsage().heapUsed - heap;
+  if (mode === "1") process.stdout.write(`${ms} ${process.resourceUsage().maxRSS * 1024} ${retained}\n`);
 };
 
-await (command === "prepare" ? prepare() : run(command));
+const bundle = async () => {
+  const { build } = require("esbuild");
+  const { mergeTable } = JSON.parse(readFileSync(join(work, "data.json"), "utf8"));
+  const mergeModule = join(orisu, "merge.js");
+  const entries = {
+    tailwind: `import { clsx } from "clsx"; import { twMerge } from "tailwind-merge"; export const cn = (...args) => twMerge(clsx(args));`,
+    cn: `export { cn } from "cn";`,
+    orisu: `export { cn } from ${JSON.stringify(join(orisu, "cn.js"))};`,
+  };
+  const mergeTablePlugin = {
+    name: "merge-table",
+    setup(build) {
+      build.onResolve({ filter: /^#merge-table$/ }, () => ({ path: "merge-table", namespace: "merge-table" }));
+      build.onLoad({ filter: /.*/, namespace: "merge-table" }, () => ({
+        resolveDir: orisu,
+        contents: `import { registerMergeTable } from ${JSON.stringify(mergeModule)}; registerMergeTable(${JSON.stringify(mergeTable)});`,
+      }));
+    },
+  };
+  const sizes = [];
+  for (const [name, contents] of Object.entries(entries)) {
+    const result = await build({
+      stdin: { contents, resolveDir: modules, loader: "js" },
+      bundle: true,
+      minify: true,
+      format: "esm",
+      write: false,
+      plugins: [mergeTablePlugin],
+    });
+    const code = result.outputFiles[0].contents;
+    sizes.push(`${name} ${code.length} ${gzipSync(code).length}`);
+  }
+  process.stdout.write(`${sizes.join("\n")}\n`);
+};
+
+await (command === "prepare" ? prepare() : command === "bundle" ? bundle() : run(command));

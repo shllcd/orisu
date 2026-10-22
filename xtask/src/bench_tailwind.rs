@@ -16,6 +16,8 @@ const DEPENDENCIES: &str = r#"{
     "@tailwindcss/node": "4.3.3",
     "@tailwindcss/oxide": "4.3.3",
     "clsx": "2.1.1",
+    "cn": "0.2.6",
+    "esbuild": "0.28.2",
     "shadcn": "4.22.1",
     "streamdown": "2.7.0",
     "tailwind-merge": "3.7.0",
@@ -36,9 +38,20 @@ const SCENARIOS: &[(&str, u64, bool)] = &[
     ("hmr-no-new-class", 200, true),
     ("canonicalize-cold", 3, true),
     ("canonicalize-warm", 50, true),
-    ("cn", 20000, true),
-    ("cn-once", 1, true),
 ];
+
+/// `cn` scenarios and iterations per measured run, compared across `CN_ENGINES`.
+const CN_SCENARIOS: &[(&str, u64)] = &[("cn", 20000), ("cn-once", 1)];
+
+/// Engine id in `bench-tailwind.mjs` and its column title.
+const CN_ENGINES: &[(&str, &str)] = &[("tailwind", "clsx+tw-merge"), ("cn", "cn"), ("orisu", "orisu/cn")];
+
+struct Sample {
+    instructions: f64,
+    ms: f64,
+    rss: u64,
+    heap: i64,
+}
 
 /// Compares orisu with Tailwind 4.3.3 on a real project, shadcn/ui docs at a pinned commit by default. Requires both to produce
 /// the same candidates and CSS, then prints instructions per iteration as `min(setup + K iterations) - min(setup)` over `--runs`.
@@ -53,7 +66,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--entry" => entry = Some(canonical(iter.next().ok_or(USAGE)?)?),
             "--root" => project = Some(canonical(iter.next().ok_or(USAGE)?)?),
             "--runs" => runs = iter.next().and_then(|n| n.parse().ok()).filter(|&n| n > 0).ok_or(USAGE)?,
-            name if SCENARIOS.iter().any(|(scenario, ..)| *scenario == name) => only.push(name.to_owned()),
+            name if SCENARIOS.iter().any(|(scenario, ..)| *scenario == name)
+                || CN_SCENARIOS.iter().any(|(scenario, _)| *scenario == name) =>
+            {
+                only.push(name.to_owned())
+            }
             _ => return Err(USAGE.to_owned()),
         }
     }
@@ -86,45 +103,89 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Err("bench-tailwind.mjs prepare failed".to_owned());
     }
 
-    println!("{:<20}{:>7}{:>11}{:>11}{:>8}{:>13}{:>13}", "scenario", "K", "tailwind", "orisu", "ratio", "tailwind", "orisu");
-    for &(scenario, k, tailwind) in SCENARIOS {
-        if !only.is_empty() && !only.iter().any(|name| name == scenario) {
-            continue;
-        }
+    let selected = |scenario: &str| only.is_empty() || only.iter().any(|name| name == scenario);
+    println!(
+        "{:<20}{:>7}{:>11}{:>11}{:>8}{:>13}{:>13}{:>11}{:>11}",
+        "scenario", "K", "tailwind", "orisu", "ratio", "tailwind", "orisu", "tailwind", "orisu"
+    );
+    for &(scenario, k, tailwind) in SCENARIOS.iter().filter(|(scenario, ..)| selected(scenario)) {
         let orisu = measure(&script, &work, "orisu", scenario, k, runs)?;
         let tailwind = if tailwind { Some(measure(&script, &work, "tailwind", scenario, k, runs)?) } else { None };
-        let ratio = tailwind.map(|(instructions, _)| format!("{:.1}×", instructions / orisu.0)).unwrap_or_default();
+        let tailwind = tailwind.as_ref();
         println!(
-            "{scenario:<20}{k:>7}{:>11}{:>11}{ratio:>8}{:>13}{:>13}",
-            tailwind.map(|(instructions, _)| si(instructions)).unwrap_or_default(),
-            si(orisu.0),
-            tailwind.map(|(_, ms)| duration(ms)).unwrap_or_default(),
-            duration(orisu.1),
+            "{scenario:<20}{k:>7}{:>11}{:>11}{:>8}{:>13}{:>13}{:>11}{:>11}",
+            tailwind.map(|t| si(t.instructions)).unwrap_or_default(),
+            si(orisu.instructions),
+            tailwind.map(|t| format!("{:.1}×", t.instructions / orisu.instructions)).unwrap_or_default(),
+            tailwind.map(|t| duration(t.ms)).unwrap_or_default(),
+            duration(orisu.ms),
+            tailwind.map(|t| bytes(t.rss as f64)).unwrap_or_default(),
+            bytes(orisu.rss as f64),
         );
     }
+
+    let cn: Vec<_> = CN_SCENARIOS.iter().filter(|(scenario, _)| selected(scenario)).collect();
+    if cn.is_empty() {
+        return Ok(());
+    }
+    let row =
+        |label: &str, cells: Vec<String>| println!("{label:<20}{}", cells.iter().map(|cell| format!("{cell:>15}")).collect::<String>());
+    println!();
+    row("cn", CN_ENGINES.iter().map(|(_, title)| title.to_string()).collect());
+    for &&(scenario, k) in &cn {
+        let samples =
+            CN_ENGINES.iter().map(|(engine, _)| measure(&script, &work, engine, scenario, k, runs)).collect::<Result<Vec<_>, _>>()?;
+        row(&format!("{scenario} instructions"), samples.iter().map(|s| si(s.instructions)).collect());
+        row(&format!("{scenario} time"), samples.iter().map(|s| duration(s.ms)).collect());
+        row(&format!("{scenario} heap"), samples.iter().map(|s| bytes(s.heap as f64)).collect());
+    }
+    let output = Command::new("node").arg(&script).arg(&work).arg("bundle").output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("bench-tailwind.mjs bundle failed:\n{}", String::from_utf8_lossy(&output.stderr)));
+    }
+    let sizes: Vec<Vec<f64>> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.split(' ').skip(1).filter_map(|n| n.parse().ok()).collect())
+        .collect();
+    row("bundle min", sizes.iter().map(|size| bytes(size[0])).collect());
+    row("bundle gzip", sizes.iter().map(|size| bytes(size[1])).collect());
     Ok(())
 }
 
-/// Instructions and wall milliseconds per iteration, each the minimum over `runs`.
-fn measure(script: &Path, work: &Path, engine: &str, scenario: &str, k: u64, runs: usize) -> Result<(f64, f64), String> {
+/// Per iteration: instructions and wall milliseconds, each the minimum over `runs`. Per process: peak RSS and JS heap retained
+/// after setup and all iterations, each the minimum over `runs`.
+fn measure(script: &Path, work: &Path, engine: &str, scenario: &str, k: u64, runs: usize) -> Result<Sample, String> {
     let iterations = k.to_string();
     let mut setup = u64::MAX;
     let mut full = u64::MAX;
     let mut ms = f64::INFINITY;
+    let mut rss = u64::MAX;
+    let mut heap = i64::MAX;
     for mode in ["0", "1"] {
         for _ in 0..runs {
-            let args =
-                [script.as_os_str(), work.as_os_str(), OsStr::new(engine), OsStr::new(scenario), OsStr::new(&iterations), OsStr::new(mode)];
+            let args = [
+                OsStr::new("--expose-gc"),
+                script.as_os_str(),
+                work.as_os_str(),
+                OsStr::new(engine),
+                OsStr::new(scenario),
+                OsStr::new(&iterations),
+                OsStr::new(mode),
+            ];
             let (instructions, stdout) = count(OsStr::new("node"), &args)?;
             if mode == "0" {
                 setup = setup.min(instructions);
             } else {
                 full = full.min(instructions);
-                ms = ms.min(stdout.trim().parse().map_err(|_| format!("{engine} {scenario}: no timing in {stdout:?}"))?);
+                let malformed = || format!("{engine} {scenario}: expected `ms rss heap`, got {stdout:?}");
+                let mut fields = stdout.split_whitespace();
+                ms = ms.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
+                rss = rss.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
+                heap = heap.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
             }
         }
     }
-    Ok((full.saturating_sub(setup) as f64 / k as f64, ms / k as f64))
+    Ok(Sample { instructions: full.saturating_sub(setup) as f64 / k as f64, ms: ms / k as f64, rss, heap })
 }
 
 /// Installs the pinned Tailwind toolchain and the shadcn docs' CSS dependencies into `deps`, returning its `node_modules`.
@@ -187,6 +248,14 @@ fn json(path: &Path) -> String {
 
 fn duration(ms: f64) -> String {
     if ms >= 1.0 { format!("{ms:.1} ms") } else { format!("{:.2} µs", ms * 1e3) }
+}
+
+fn bytes(n: f64) -> String {
+    match n.abs() {
+        a if a >= 1048576.0 => format!("{:.1} MB", n / 1048576.0),
+        a if a >= 1024.0 => format!("{:.1} KB", n / 1024.0),
+        _ => format!("{n:.0} B"),
+    }
 }
 
 fn si(n: f64) -> String {
