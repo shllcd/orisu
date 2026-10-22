@@ -4,3 +4,4 @@ dist
 *.node
 packages/orisu/presets
 .npmrc
+.DS_Store
