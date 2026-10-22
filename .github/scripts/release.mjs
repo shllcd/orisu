@@ -66,7 +66,6 @@ const bumpVersion = () => {
   for (const name of Object.keys(pkg.optionalDependencies)) pkg.optionalDependencies[name] = version;
   write(manifest, `${JSON.stringify(pkg, null, 2)}\n`);
   write("packages/orisu/src/cli.ts", replace(read("packages/orisu/src/cli.ts"), /const VERSION = "[^"]+";/, `const VERSION = "${version}";`));
-  write("editors/zed/extension.toml", replace(read("editors/zed/extension.toml"), /^version = "[^"]+"$/m, `version = "${version}"`));
   const section = `## [Unreleased]\n\n## [${version}] - ${new Date().toISOString().slice(0, 10)}\n\n${notes}\n\n`;
   const updated = changelog.slice(0, match.index) + section + changelog.slice(match.index + match[0].length);
   write("CHANGELOG.md", `${updated.trimEnd()}\n`);

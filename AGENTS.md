@@ -7,7 +7,7 @@ Talk to the user in Russian, with short progress updates.
 - No `//` comments except `// SAFETY:`, license headers and lint suppressions with a reason. Doc comments only where the signature doesn't express the contract.
 - No dead code or TODOs.
 - Don't commit tests. Correctness is checked byte-for-byte against Tailwind 4.3.3: `cargo xtask conformance <dir>`.
-- Rust: `cargo fmt` (width 140), `cargo clippy --workspace` with no warnings. `editors/zed` is a separate workspace; check it too.
+- Rust: `cargo fmt` (width 140), `cargo clippy --workspace` with no warnings.
 - Crate dependencies point down only: `allocator → ast → parser → theme/candidate → registry → compiler → …`. Adapters (`compat_tailwind`, `lsp`, `napi`) depend on the core, never the reverse.
 - Use oxc as a reference for parser structure and Tailwind for behavior, but copy neither blindly. Don't reproduce Tailwind bugs (e.g. canonicalize output depending on call order).
 

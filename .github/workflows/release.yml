@@ -225,12 +225,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: gh release create "v$VERSION" --title "v$VERSION" --notes-file notes.md
-      # The extensions.toml entry must list `version` before `path`; the action only matches it there.
-      - name: Publish Zed extension
-        uses: huacnlee/zed-extension-action@8cd592a0d24e1e41157740f1a529aeabddc88a1b # v2.0.0
-        with:
-          extension-name: orisu
-          tag: v${{ needs.prepare.outputs.version }}
-          push-to: shllcd/extensions
-        env:
-          COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
