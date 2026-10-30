@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Environment, EnvironmentModuleNode, InternalResolveOptions, Plugin, ResolvedConfig, ViteDevServer } from "vite";
 import { check, compile, expandVariantGroups, Features, normalizePath, optimize, Scanner, type Compiler } from "./index.ts";
+import { encodeMergeTable } from "./table.ts";
 
 const SPECIAL_QUERY_RE = /[?&](?:worker|sharedworker|raw|url)\b/;
 const COMMON_JS_PROXY_RE = /\?commonjs-proxy/;
@@ -106,8 +107,8 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
 
   function mergeTable(envName: string): string {
     const root = findRoot(envName);
-    if (!root) return JSON.stringify({ keys: [], values: [], erases: [] });
-    return JSON.stringify(root.compiler!.mergeTable(root.allCandidates));
+    if (!root) return JSON.stringify(encodeMergeTable({ prefix: null, keys: [], values: [], erases: [] }));
+    return JSON.stringify(encodeMergeTable(root.compiler!.mergeTable(root.allCandidates)));
   }
 
   async function generate(this: { environment: Environment; addWatchFile(file: string): void }, src: string, id: string) {

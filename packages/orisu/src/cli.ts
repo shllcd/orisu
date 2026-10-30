@@ -11,6 +11,7 @@ import { check } from "./check.ts";
 import { manifest } from "./manifest.ts";
 import { compile, lsp, optimize, Scanner, type Compiler } from "./index.ts";
 import type { ChangedContent, SourceEntry } from "./native.ts";
+import { encodeMergeTable } from "./table.ts";
 
 const VERSION = "0.1.0";
 const DEFAULT_INPUT = '@import "tailwindcss";\n';
@@ -217,7 +218,7 @@ const run = async (args: Args) => {
     else if (output !== previous.output) process.stdout.write(`${output}\n`);
     previous.output = output;
     if (mergeTableFile) {
-      const table = JSON.stringify(compiler.mergeTable([...seen]));
+      const table = JSON.stringify(encodeMergeTable(compiler.mergeTable([...seen])));
       await outputFile(mergeTableFile, `import { registerMergeTable } from "orisu/cn";\nregisterMergeTable(${table});\n`);
     }
   };

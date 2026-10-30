@@ -46,7 +46,3 @@ On the shadcn/ui docs, with byte-identical CSS:
 | `cn` per call      |        1.51 µs | 0.29 µs |
 
 The full numbers (instructions, memory, `cn` against shadcn's `cn`, bundle size) are in [BENCHMARKS.md](BENCHMARKS.md).
-
-## License
-
-MIT

@@ -5,6 +5,7 @@ import { gzipSync } from "node:zlib";
 
 const [work, command, scenario, k, mode] = process.argv.slice(2);
 const { entry, root, modules, orisu } = JSON.parse(readFileSync(join(work, "config.json"), "utf8"));
+const { encodeMergeTable } = await import(join(orisu, "table.js"));
 const require = createRequire(join(modules, "noop.js"));
 const base = dirname(entry);
 const css = readFileSync(entry, "utf8");
@@ -100,7 +101,7 @@ const run = async (impl) => {
     }
     if (impl === "cn") return require("cn").cn;
     const { cn, registerMergeTable } = await import(join(orisu, "cn.js"));
-    registerMergeTable((await engine.compile()).mergeTable(candidates));
+    registerMergeTable(encodeMergeTable((await engine.compile()).mergeTable(candidates)));
     return cn;
   };
 
@@ -214,7 +215,9 @@ const bundle = async () => {
       build.onResolve({ filter: /^#merge-table$/ }, () => ({ path: "merge-table", namespace: "merge-table" }));
       build.onLoad({ filter: /.*/, namespace: "merge-table" }, () => ({
         resolveDir: orisu,
-        contents: `import { registerMergeTable } from ${JSON.stringify(mergeModule)}; registerMergeTable(${JSON.stringify(mergeTable)});`,
+        contents:
+          `import { registerMergeTable } from ${JSON.stringify(mergeModule)}; ` +
+          `registerMergeTable(${JSON.stringify(encodeMergeTable(mergeTable))});`,
       }));
     },
   };

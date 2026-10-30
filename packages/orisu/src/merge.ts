@@ -52,20 +52,31 @@ let doorBase = 0;
 let doorEpoch = 1;
 let doorMarks = 0;
 
-/** Installs the shape table generated at build time; classes missing from it are never merged away. */
-export const registerMergeTable = (table: {
+export interface MergeTableSource {
   prefix?: string | null;
-  keys: readonly string[];
-  values: readonly number[];
+  keys: string;
+  values: string;
   erases: readonly (readonly number[])[];
-}): void => {
+  alias: string;
+}
+
+/** Installs the shape table `encodeMergeTable` writes; classes missing from it are never merged away. */
+export const registerMergeTable = (table: MergeTableSource): void => {
   prefix = table.prefix ?? "";
   erasures = table.erases;
-  stride = Math.max(erasures.length, 1);
+  const parts = table.keys.split("\n");
+  const values = table.values.split(",");
+  const alias = table.alias.split(",");
+  // Shapes, not the deduplicated lists, index the stamps.
+  stride = Math.max(alias.length, 1);
   entries = new Map();
-  for (let i = 0; i < table.keys.length; i++) {
-    const shape = table.values[i]!;
-    entries.set(table.keys[i]!, { group: 0, shape, erases: erasures[shape]! });
+  let previous = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i]!;
+    const key = previous.slice(0, part.charCodeAt(0) - 32) + part.slice(1);
+    previous = key;
+    const shape = +values[i]!;
+    entries.set(key, { group: 0, shape, erases: erasures[+alias[shape]!]! });
   }
   groups = new Map([["", 0]]);
   stamps = new Int32Array(0);

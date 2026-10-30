@@ -38,12 +38,12 @@ shadcn/ui `cn`) and [`cn`](https://github.com/shadcn-ui/cn) 0.2.6.
 | Time per call                |               1.51 µs | 0.52 µs |  0.29 µs |
 | Instructions, each call once |                137.2M |  222.4M |   107.4M |
 | Time, each call once         |                5.2 ms |  7.4 ms |   3.5 ms |
-| Retained JS heap             |                1.4 MB |  890 KB |   949 KB |
-| Bundle, minified             |               27.1 KB | 25.4 KB | 114.1 KB |
-| Bundle, gzip                 |                8.5 KB | 10.4 KB |  17.5 KB |
+| Retained JS heap             |                1.4 MB |  890 KB |   596 KB |
+| Bundle, minified             |               27.1 KB | 25.4 KB |  36.5 KB |
+| Bundle, gzip                 |                8.5 KB | 10.4 KB |  14.0 KB |
 
 "Per call" repeats the calls 20000 times, so caches are warm. "Each call once" is the first render: no cache hits.
 Retained heap is measured after the warm run and includes caches and the merge table.
 
-The orisu bundle includes the merge table the compiler generates for this project: 1927 class shapes, 109 KB minified
-and 15 KB gzip. It grows with the number of classes the project uses. The `orisu/cn` code itself is under 4.5 KB gzip.
+The orisu bundle includes the merge table the compiler generates for this project: 1927 class names, 31 KB minified
+and 11 KB gzip. It grows with the number of classes the project uses. The `orisu/cn` code itself is 2.6 KB gzip.
