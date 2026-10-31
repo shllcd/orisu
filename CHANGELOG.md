@@ -9,6 +9,10 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+### Fixed
+
+- `translate-*`, `translate-x-*`, `translate-y-*` and `translate-z-*` with a theme, fraction or arbitrary value (e.g. `-translate-x-1/2`) emit the `@property --tw-translate-*` rules again. Without them the unset axis was invalid and `translate` was dropped.
+
 ## [0.2.0] - 2026-10-30
 
 ### Changed

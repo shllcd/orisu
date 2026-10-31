@@ -637,10 +637,7 @@ impl<'a> Functional<'a> {
         match self.resolve(cx, candidate, negative)? {
             Resolved::Declarations(declarations) => Some(declaration_nodes(cx, declarations.iter().copied())),
             Resolved::Nodes(nodes) => Some(nodes),
-            Resolved::Value(value, data_type) => match &self.decl {
-                Some(decl) => Some(declaration_nodes(cx, decl(cx, value, data_type)?.iter().copied())),
-                None => (self.handle)(cx, value, data_type),
-            },
+            Resolved::Value(value, data_type) => (self.handle)(cx, value, data_type),
         }
     }
 
