@@ -4,7 +4,7 @@ pub mod sources;
 
 use crate::GlobEntry;
 use crate::attributify::Attributify;
-use crate::cache::{Cache, Stat};
+use crate::cache::{self, Cache, Guard, Stat};
 use crate::extractor::{Extracted, Extractor};
 use crate::glob::optimize_patterns;
 use crate::manifest;
@@ -13,7 +13,7 @@ use crate::scanner::sources::{PublicSourceEntry, SourceEntry, Sources, public_so
 use auto_source_detection::BINARY_EXTENSIONS_GLOB;
 use bstr::ByteSlice;
 use fast_glob::glob_match;
-use orisu_ignore::{WalkBuilder, gitignore::GitignoreBuilder, path_starts_with};
+use orisu_ignore::{WalkBuilder, git_exclude_files, gitignore::GitignoreBuilder, is_normal_path, path_starts_with};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
@@ -114,10 +114,11 @@ impl Scanner {
     }
 
     /// Keeps the candidates of every scanned file in `dir`, keyed by content, so unchanged files are not extracted again
-    /// by this or any later scanner.
+    /// by this or any later scanner with the same sources, and the files the walk found.
     pub fn with_cache(mut self, dir: impl Into<PathBuf>) -> Self {
-        let options = format!("{:?}", self.attributify);
-        self.cache = Some(Cache::open(dir.into().join("scanner.bin"), &options));
+        let options = format!("{:?}\n{:?}", self.attributify, self.sources);
+        let name = format!("scanner-{}.bin", &blake3::hash(options.as_bytes()).to_hex()[..16]);
+        self.cache = Some(Cache::open(dir.into().join(name), &options));
         self
     }
 
@@ -331,10 +332,13 @@ impl Scanner {
         }
         self.sources_scanned = true;
 
-        let mut all_entries = self.walker.as_mut().map(walk_parallel).unwrap_or_default();
+        let mut all_entries = match (&mut self.cache, &mut self.walker) {
+            (Some(cache), Some(walker)) => walk_cached(cache, walker, &self.sources),
+            (None, Some(walker)) => walk_parallel(walker),
+            (_, None) => vec![],
+        };
         for manifest in &self.manifests {
-            let mtime = manifest.metadata().ok().as_ref().and_then(Stat::of);
-            all_entries.push((manifest.clone(), false, MANIFEST.to_owned(), mtime));
+            all_entries.push((manifest.clone(), false, MANIFEST.to_owned(), Stat::at(manifest)));
         }
 
         let mut css_files: Vec<PathBuf> = vec![];
@@ -460,12 +464,16 @@ fn extract_cached(cache: &mut Cache, files: Vec<(PathBuf, String, Option<Stat>)>
 fn extract_files(files: Vec<ContentFile>, attributify: Option<&Attributify>) -> FxHashSet<String> {
     files
         .into_par_iter()
-        .fold(FxHashSet::default, |mut set: FxHashSet<String>, (path, extension)| {
+        .fold(Default::default, |(mut set, mut seen): (FxHashSet<String>, FxHashSet<Box<[u8]>>), (path, extension)| {
             let Ok(content) = std::fs::read(&path) else {
-                return set;
+                return (set, seen);
             };
             let blob = expand_variant_groups(pre_process_input(content, &extension));
             for line in blob.split(|x| *x == b'\n').filter(|line| !line.is_empty()) {
+                if seen.contains(line) {
+                    continue;
+                }
+                seen.insert(line.into());
                 for extracted in Extractor::new(line).extract() {
                     let (Extracted::Candidate(bytes) | Extracted::CssVariable(bytes)) = extracted;
                     let Ok(candidate) = std::str::from_utf8(bytes) else {
@@ -479,8 +487,9 @@ fn extract_files(files: Vec<ContentFile>, attributify: Option<&Attributify>) -> 
             if let Some(attributify) = attributify {
                 attributify.extract(&blob, &mut set);
             }
-            set
+            (set, seen)
         })
+        .map(|(set, _)| set)
         .reduce(FxHashSet::default, |mut a, mut b| {
             if a.len() < b.len() {
                 std::mem::swap(&mut a, &mut b);
@@ -568,6 +577,51 @@ where
 
 type WalkEntry = (PathBuf, bool, String, Option<Stat>);
 
+fn walk_entry(path: PathBuf, is_dir: bool) -> WalkEntry {
+    if is_dir {
+        return (path, true, String::new(), None);
+    }
+    let ext = path.extension().and_then(|x| x.to_str()).unwrap_or_default().to_owned();
+    let stat = Stat::at(&path);
+    (path, false, ext, stat)
+}
+
+/// The stats a directory's listing and ignore rules depend on: its own, those of its ignore files and those of the git
+/// exclude files. A missing `.gitignore` or `.ignore` needs no guard, since creating one changes the directory.
+fn dir_guards(dir: &Path) -> Vec<Guard> {
+    let mut guards = vec![(dir.to_path_buf(), Stat::at(dir))];
+    for name in [".gitignore", ".ignore"] {
+        let path = dir.join(name);
+        if let Some(stat) = Stat::at(&path) {
+            guards.push((path, Some(stat)));
+        }
+    }
+    guards.extend(git_exclude_files(dir).into_iter().map(|path| {
+        let stat = Stat::at(&path);
+        (path, stat)
+    }));
+    guards
+}
+
+/// Reuses the entries of the cached walk while no directory it entered and no ignore file it read changed; otherwise
+/// walks and caches the result. Guards are taken after the walk, so one that changed during it is too fresh to keep.
+fn walk_cached(cache: &mut Cache, walker: &mut WalkBuilder, sources: &Sources) -> Vec<WalkEntry> {
+    if let Some(entries) = cache.walked() {
+        return entries.par_iter().map(|(path, is_dir)| walk_entry(path.clone(), *is_dir)).collect();
+    }
+    let start = cache::now();
+    let entries = walk_parallel(walker);
+    let mut dirs: FxHashSet<&Path> = entries.iter().filter(|(_, is_dir, _, _)| *is_dir).map(|(path, _, _, _)| path.as_path()).collect();
+    for source in sources.iter() {
+        if let SourceEntry::Auto { base } | SourceEntry::Pattern { base, .. } | SourceEntry::External { base } = source {
+            dirs.extend(base.ancestors());
+        }
+    }
+    let guards = dirs.into_par_iter().flat_map_iter(dir_guards).collect();
+    cache.set_walk(guards, entries.iter().map(|(path, is_dir, _, _)| (path.clone(), *is_dir)).collect(), start);
+    entries
+}
+
 /// A content file and its extension.
 type ContentFile = (PathBuf, String);
 
@@ -596,15 +650,7 @@ fn walk_parallel(walker: &mut WalkBuilder) -> Vec<WalkEntry> {
             };
 
             let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            let path = entry.into_path();
-
-            if is_dir {
-                buf.local.push((path, true, String::new(), None));
-            } else {
-                let ext = path.extension().and_then(|x| x.to_str()).unwrap_or_default().to_owned();
-                let mtime = path.metadata().ok().as_ref().and_then(Stat::of);
-                buf.local.push((path, false, ext, mtime));
-            }
+            buf.local.push(walk_entry(entry.into_path(), is_dir));
 
             if buf.local.len() >= 256 {
                 buf.shared.lock().unwrap().append(&mut buf.local);
@@ -709,10 +755,10 @@ fn create_walker(sources: &Sources) -> Option<WalkBuilder> {
         builder.add_gitignore(ignore);
     }
 
-    let auto_bases: Vec<PathBuf> = sources
+    let auto_bases: Vec<(PathBuf, bool)> = sources
         .iter()
         .filter_map(|source| match source {
-            SourceEntry::Auto { base } | SourceEntry::External { base } => Some(base.clone()),
+            SourceEntry::Auto { base } | SourceEntry::External { base } => Some((base.clone(), is_normal_path(base))),
             _ => None,
         })
         .collect();
@@ -731,8 +777,9 @@ fn create_walker(sources: &Sources) -> Option<WalkBuilder> {
         if entry.file_type().is_some_and(|ft| ft.is_file()) {
             let mut matches = false;
 
-            for base in &auto_bases {
-                if path_starts_with(path, base) {
+            let normal = is_normal_path(path);
+            for (base, base_is_normal) in &auto_bases {
+                if path_starts_with(path, base, normal && *base_is_normal) {
                     matches = true;
                     break;
                 }

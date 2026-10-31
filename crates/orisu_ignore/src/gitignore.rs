@@ -21,7 +21,7 @@ use {
 
 use crate::{
     Error, Match, PartialErrorBuilder,
-    pathutil::{is_file_name, strip_prefix},
+    pathutil::{is_file_name, is_normal_path, strip_prefix},
 };
 
 /// Glob represents a single glob in a gitignore file.
@@ -86,6 +86,7 @@ pub struct Gitignore {
     num_whitelists: u64,
     matches: Option<Arc<Pool<Vec<usize>>>>,
     only_on_files: bool,
+    root_is_normal: bool,
 }
 
 impl Gitignore {
@@ -145,6 +146,7 @@ impl Gitignore {
             num_whitelists: 0,
             matches: None,
             only_on_files: false,
+            root_is_normal: true,
         }
     }
 
@@ -153,6 +155,11 @@ impl Gitignore {
     /// All matches are done relative to this path.
     pub fn path(&self) -> &Path {
         &*self.root
+    }
+
+    /// Whether [`Gitignore::path`] passes [`is_normal_path`].
+    pub(crate) fn root_is_normal(&self) -> bool {
+        self.root_is_normal
     }
 
     /// Returns true if and only if this gitignore has zero globs, and
@@ -321,6 +328,7 @@ impl GitignoreBuilder {
             num_whitelists: nwhite as u64,
             matches: Some(Arc::new(Pool::new(|| vec![]))),
             only_on_files: self.only_on_files,
+            root_is_normal: is_normal_path(&self.root),
         })
     }
 

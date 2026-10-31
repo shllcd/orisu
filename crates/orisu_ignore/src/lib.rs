@@ -56,7 +56,8 @@ mod dir;
 pub mod gitignore;
 pub mod overrides;
 mod pathutil;
-pub use crate::pathutil::path_starts_with;
+pub use crate::dir::git_exclude_files;
+pub use crate::pathutil::{is_normal_path, path_starts_with};
 pub mod types;
 mod walk;
 

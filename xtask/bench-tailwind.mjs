@@ -118,7 +118,7 @@ const run = async (impl) => {
     },
     "scan-cached": async () => {
       const compiler = await engine.compile();
-      const cache = join(work, "scanner-cache");
+      const cache = join(work, "deps", "scanner-cache");
       rmSync(cache, { recursive: true, force: true });
       engine.scanner(compiler, { cache }).scan();
       return () => {

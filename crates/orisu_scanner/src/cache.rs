@@ -1,13 +1,28 @@
 use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-const MAGIC: &[u8; 8] = b"ORISUSC\x02";
+const MAGIC: &[u8; 8] = b"ORISUSC\x03";
 
 pub type Key = [u8; 32];
+
+/// A path whose stat, or absence, the walk depended on.
+pub type Guard = (PathBuf, Option<Stat>);
+
+/// The entries one walk found, valid while every guard keeps its stat.
+#[derive(Debug, Clone)]
+struct Walk {
+    guards: Vec<Guard>,
+    entries: Vec<(PathBuf, bool)>,
+}
+
+pub fn now() -> Duration {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
+}
 
 /// Modification time, size and inode of a file: equal stats mean the content is taken as unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,9 +38,16 @@ impl Stat {
         Some(Self([mtime.as_secs(), u64::from(mtime.subsec_nanos()), meta.len(), ino]))
     }
 
-    /// Whether the file was written so recently that a later write may keep the same mtime.
-    fn is_racy(self, now: u64) -> bool {
-        self.0[0] + 2 > now
+    pub fn at(path: &Path) -> Option<Self> {
+        Self::of(&path.metadata().ok()?)
+    }
+
+    /// Whether the file was written after `now`, or so shortly before that a later write may keep the same mtime.
+    /// Whole-second mtimes come from coarse file systems (down to 2 s on FAT); finer ones advance at least every clock
+    /// tick (up to 15.6 ms on Windows).
+    fn is_racy(self, now: Duration) -> bool {
+        let window = if self.0[1] == 0 { Duration::from_secs(2) } else { Duration::from_millis(50) };
+        Duration::new(self.0[0], self.0[1] as u32) + window > now
     }
 }
 
@@ -42,6 +64,7 @@ pub struct Cache {
     entries: FxHashMap<Key, Box<[u32]>>,
     stats: FxHashMap<PathBuf, (Stat, Key)>,
     used: FxHashSet<Key>,
+    walk: Option<Walk>,
     dirty: bool,
 }
 
@@ -52,8 +75,8 @@ impl Cache {
         hasher.update(env!("CARGO_PKG_VERSION").as_bytes()).update(&[0]).update(options.as_bytes());
         let salt = *hasher.finalize().as_bytes();
         let decoded = fs::read(&path).ok().and_then(|bytes| decode(&bytes, &salt));
-        let (text, ends, entries, stats) = decoded.unwrap_or_default();
-        Self { path, salt, text, ends, ids: FxHashMap::default(), entries, stats, used: FxHashSet::default(), dirty: false }
+        let (text, ends, entries, stats, walk) = decoded.unwrap_or_default();
+        Self { path, salt, text, ends, ids: FxHashMap::default(), entries, stats, used: FxHashSet::default(), walk, dirty: false }
     }
 
     pub fn key(&self, extension: &str, content: &[u8]) -> Key {
@@ -70,7 +93,7 @@ impl Cache {
 
     /// Remembers the key of `path` for its `stat`, unless the file is too fresh to trust its mtime.
     pub fn remember(&mut self, path: PathBuf, stat: Option<Stat>, key: Key) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let now = now();
         match stat.filter(|stat| !stat.is_racy(now)) {
             Some(stat) => {
                 if self.stats.insert(path, (stat, key)) != Some((stat, key)) {
@@ -83,6 +106,21 @@ impl Cache {
                 }
             }
         }
+    }
+
+    /// The entries of the last walk, when none of its guards changed since.
+    pub fn walked(&self) -> Option<&[(PathBuf, bool)]> {
+        let walk = self.walk.as_ref()?;
+        walk.guards.par_iter().all(|(path, stat)| Stat::at(path) == *stat).then_some(&walk.entries)
+    }
+
+    /// Remembers a walk that started at `start` with guards taken after it, unless a guard changed since shortly before
+    /// the start or a path is not UTF-8.
+    pub fn set_walk(&mut self, guards: Vec<Guard>, entries: Vec<(PathBuf, bool)>, start: Duration) {
+        let valid = guards.iter().all(|(path, stat)| path.to_str().is_some() && !stat.is_some_and(|stat| stat.is_racy(start)))
+            && entries.iter().all(|(path, _)| path.to_str().is_some());
+        self.walk = valid.then_some(Walk { guards, entries });
+        self.dirty = true;
     }
 
     pub fn get(&mut self, key: &Key) -> Option<&[u32]> {
@@ -169,6 +207,21 @@ impl Cache {
             }
             file.write_all(key)?;
         }
+        if let Some(walk) = &self.walk {
+            file.write_all(&(walk.guards.len() as u32).to_le_bytes())?;
+            for (path, stat) in &walk.guards {
+                write_path(&mut file, path)?;
+                file.write_all(&[u8::from(stat.is_some())])?;
+                for field in stat.map_or([0; 4], |stat| stat.0) {
+                    file.write_all(&field.to_le_bytes())?;
+                }
+            }
+            file.write_all(&(walk.entries.len() as u32).to_le_bytes())?;
+            for (path, is_dir) in &walk.entries {
+                write_path(&mut file, path)?;
+                file.write_all(&[u8::from(*is_dir)])?;
+            }
+        }
         file.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
         fs::rename(&tmp, &self.path)?;
         self.dirty = false;
@@ -176,7 +229,13 @@ impl Cache {
     }
 }
 
-type Decoded = (String, Vec<u32>, FxHashMap<Key, Box<[u32]>>, FxHashMap<PathBuf, (Stat, Key)>);
+fn write_path(file: &mut impl Write, path: &Path) -> io::Result<()> {
+    let path = path.to_str().unwrap_or_default();
+    file.write_all(&(path.len() as u32).to_le_bytes())?;
+    file.write_all(path.as_bytes())
+}
+
+type Decoded = (String, Vec<u32>, FxHashMap<Key, Box<[u32]>>, FxHashMap<PathBuf, (Stat, Key)>, Option<Walk>);
 
 fn decode(bytes: &[u8], salt: &Key) -> Option<Decoded> {
     let mut reader = Reader { bytes };
@@ -206,16 +265,28 @@ fn decode(bytes: &[u8], salt: &Key) -> Option<Decoded> {
     let count = reader.u32()?;
     let mut stats = FxHashMap::with_capacity_and_hasher(count.min(1 << 20) as usize, Default::default());
     for _ in 0..count {
-        let len = reader.u32()? as usize;
-        let path = PathBuf::from(std::str::from_utf8(reader.take(len)?).ok()?);
-        let mut stat = [0; 4];
-        for field in &mut stat {
-            *field = reader.u64()?;
-        }
+        let path = reader.path()?;
+        let stat = reader.stat()?;
         let key: Key = reader.take(32)?.try_into().ok()?;
-        stats.insert(path, (Stat(stat), key));
+        stats.insert(path, (stat, key));
     }
-    reader.bytes.is_empty().then_some((text, ends, entries, stats))
+    let walk = if reader.bytes.is_empty() {
+        None
+    } else {
+        let count = reader.u32()?;
+        let guards = (0..count)
+            .map(|_| {
+                let path = reader.path()?;
+                let present = reader.take(1)?[0] == 1;
+                let stat = reader.stat()?;
+                Some((path, present.then_some(stat)))
+            })
+            .collect::<Option<_>>()?;
+        let count = reader.u32()?;
+        let entries = (0..count).map(|_| Some((reader.path()?, reader.take(1)?[0] == 1))).collect::<Option<_>>()?;
+        Some(Walk { guards, entries })
+    };
+    reader.bytes.is_empty().then_some((text, ends, entries, stats, walk))
 }
 
 struct Reader<'a> {
@@ -235,5 +306,18 @@ impl<'a> Reader<'a> {
 
     fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn path(&mut self) -> Option<PathBuf> {
+        let len = self.u32()? as usize;
+        Some(PathBuf::from(std::str::from_utf8(self.take(len)?).ok()?))
+    }
+
+    fn stat(&mut self) -> Option<Stat> {
+        let mut stat = [0; 4];
+        for field in &mut stat {
+            *field = self.u64()?;
+        }
+        Some(Stat(stat))
     }
 }

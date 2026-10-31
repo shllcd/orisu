@@ -41,25 +41,35 @@ pub(crate) fn is_hidden(dent: &DirEntry) -> bool {
     if let Some(name) = file_name(dent.path()) { name.to_str().map(|s| s.starts_with(".")).unwrap_or(false) } else { false }
 }
 
-/// Same as [`Path::starts_with`], comparing bytes instead of components when neither path holds a component that
-/// `Path::components` would normalize away.
+/// Whether [`Path::components`] keeps every byte of `path`, so that prefixes of such paths can be compared as bytes.
 #[cfg(unix)]
-pub fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+pub fn is_normal_path(path: &Path) -> bool {
     use memchr::memmem;
     use std::os::unix::ffi::OsStrExt;
 
-    let normal = |bytes: &[u8]| {
-        !bytes.starts_with(b"./")
-            && bytes != b"."
-            && !bytes.ends_with(b"/.")
-            && memmem::find(bytes, b"//").is_none()
-            && memmem::find(bytes, b"/./").is_none()
-    };
     let bytes = path.as_os_str().as_bytes();
-    let mut head = prefix.as_os_str().as_bytes();
-    if !normal(bytes) || !normal(head) {
+    !bytes.starts_with(b"./")
+        && bytes != b"."
+        && !bytes.ends_with(b"/.")
+        && memmem::find(bytes, b"//").is_none()
+        && memmem::find(bytes, b"/./").is_none()
+}
+
+#[cfg(not(unix))]
+pub fn is_normal_path(_: &Path) -> bool {
+    false
+}
+
+/// Same as [`Path::starts_with`]; `normal` says that both paths pass [`is_normal_path`], which lets it compare bytes.
+#[cfg(unix)]
+pub fn path_starts_with(path: &Path, prefix: &Path, normal: bool) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    if !normal {
         return path.starts_with(prefix);
     }
+    let bytes = path.as_os_str().as_bytes();
+    let mut head = prefix.as_os_str().as_bytes();
     if head.len() > 1 && head.ends_with(b"/") {
         head = &head[..head.len() - 1];
     }
@@ -70,7 +80,7 @@ pub fn path_starts_with(path: &Path, prefix: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-pub fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+pub fn path_starts_with(path: &Path, prefix: &Path, _: bool) -> bool {
     path.starts_with(prefix)
 }
 

@@ -10,7 +10,7 @@ use std::{
 use crate::{
     gitignore::{self, Gitignore, GitignoreBuilder},
     overrides::{self, Override},
-    pathutil::{is_hidden, path_starts_with, strip_prefix},
+    pathutil::{is_hidden, is_normal_path, path_starts_with, strip_prefix},
     types::{self, Types},
     walk::DirEntry,
     {Error, Match, PartialErrorBuilder},
@@ -381,8 +381,9 @@ impl Ignore {
                 }
             }
         }
+        let normal = is_normal_path(path);
         for gi in self.0.explicit_ignores.iter().rev() {
-            if !path_starts_with(path, gi.path()) {
+            if !path_starts_with(path, gi.path(), normal && gi.root_is_normal()) {
                 continue;
             }
             if !m_explicit.is_none() {
@@ -708,6 +709,23 @@ pub(crate) fn create_gitignore<T: AsRef<OsStr>>(
 /// them when multiple repositories are searched.
 ///
 /// Some I/O errors are ignored.
+/// The files the `info/exclude` rules of `dir` are read from: `.git` when it is a file pointing to a worktree, and the
+/// exclude file it resolves to, present or not. Empty when `dir` has no `.git`.
+pub fn git_exclude_files(dir: &Path) -> Vec<PathBuf> {
+    let git = dir.join(".git");
+    let Ok(meta) = git.metadata() else {
+        return vec![];
+    };
+    let mut files = vec![];
+    if meta.is_file() {
+        files.push(git);
+    }
+    if let Ok(common) = resolve_git_commondir(dir, Some(meta.file_type())) {
+        files.push(common.join("info/exclude"));
+    }
+    files
+}
+
 fn resolve_git_commondir(dir: &Path, git_type: Option<FileType>) -> Result<PathBuf, Option<Error>> {
     let git_dir_path = || dir.join(".git");
     let git_dir = git_dir_path();
