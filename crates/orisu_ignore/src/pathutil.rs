@@ -41,6 +41,39 @@ pub(crate) fn is_hidden(dent: &DirEntry) -> bool {
     if let Some(name) = file_name(dent.path()) { name.to_str().map(|s| s.starts_with(".")).unwrap_or(false) } else { false }
 }
 
+/// Same as [`Path::starts_with`], comparing bytes instead of components when neither path holds a component that
+/// `Path::components` would normalize away.
+#[cfg(unix)]
+pub fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    use memchr::memmem;
+    use std::os::unix::ffi::OsStrExt;
+
+    let normal = |bytes: &[u8]| {
+        !bytes.starts_with(b"./")
+            && bytes != b"."
+            && !bytes.ends_with(b"/.")
+            && memmem::find(bytes, b"//").is_none()
+            && memmem::find(bytes, b"/./").is_none()
+    };
+    let bytes = path.as_os_str().as_bytes();
+    let mut head = prefix.as_os_str().as_bytes();
+    if !normal(bytes) || !normal(head) {
+        return path.starts_with(prefix);
+    }
+    if head.len() > 1 && head.ends_with(b"/") {
+        head = &head[..head.len() - 1];
+    }
+    match bytes.strip_prefix(head) {
+        Some(rest) => head.is_empty() || head == b"/" || rest.is_empty() || rest[0] == b'/',
+        None => false,
+    }
+}
+
+#[cfg(not(unix))]
+pub fn path_starts_with(path: &Path, prefix: &Path) -> bool {
+    path.starts_with(prefix)
+}
+
 /// Strip `prefix` from the `path` and return the remainder.
 ///
 /// If `path` doesn't have a prefix `prefix`, then return `None`.

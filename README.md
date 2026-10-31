@@ -40,9 +40,9 @@ On the shadcn/ui docs, with byte-identical CSS:
 
 | Scenario           | Tailwind 4.3.3 |   orisu |
 | ------------------ | -------------: | ------: |
-| build              |        62.9 ms | 12.2 ms |
-| HMR                |        14.4 ms |  1.1 ms |
-| canonicalize, cold |      1560.7 ms | 30.2 ms |
-| `cn` per call      |        1.51 µs | 0.29 µs |
+| build              |        63.1 ms | 12.3 ms |
+| HMR                |        15.1 ms |  1.1 ms |
+| canonicalize, cold |      1475.7 ms | 29.6 ms |
+| `cn` per call      |        1.48 µs | 0.26 µs |
 
 The full numbers (instructions, memory, `cn` against shadcn's `cn`, bundle size) are in [BENCHMARKS.md](BENCHMARKS.md).

@@ -15,15 +15,15 @@ are more stable than wall time. Memory is the process's peak RSS, Node included.
 
 | Scenario               | Instructions, Tailwind | orisu |      | Time, Tailwind |    orisu | Memory, Tailwind |    orisu |
 | ---------------------- | ---------------------: | ----: | ---: | -------------: | -------: | ---------------: | -------: |
-| compile                |                 253.2M | 29.2M | 8.7× |         9.0 ms |   2.1 ms |         106.3 MB |  69.2 MB |
-| scan                   |                  4.86G | 4.87G | 1.0× |       140.5 ms | 106.1 ms |         143.9 MB | 122.8 MB |
-| scan, cached           |                        | 997.5M |     |                |  26.3 ms |                  | 148.6 MB |
-| build                  |                  1.67G | 166.4M | 10.1× |       62.9 ms |  12.2 ms |         232.1 MB | 155.7 MB |
-| cold start             |                  7.11G | 5.05G | 1.4× |       222.5 ms | 121.6 ms |         232.2 MB | 138.3 MB |
-| HMR                    |                 287.2M | 18.4M | 15.6× |       14.4 ms |   1.1 ms |         298.2 MB | 122.6 MB |
-| HMR, no new class      |                   4.8M |  3.8M | 1.2× |         142 µs |   151 µs |         170.2 MB | 110.1 MB |
-| canonicalize, cold     |                 34.57G | 1.17G | 29.6× |    1560.7 ms |  30.2 ms |         879.1 MB | 106.5 MB |
-| canonicalize, warm     |                 221.0M |  1.3M | 176.1× |       10.0 ms |    69 µs |         422.7 MB |  86.0 MB |
+| compile                |                 253.2M | 29.0M | 8.7× |         9.0 ms |   1.9 ms |         104.5 MB |  69.3 MB |
+| scan                   |                  4.87G | 4.10G | 1.2× |       151.0 ms |  81.5 ms |         143.1 MB | 104.5 MB |
+| scan, cached           |                        | 743.7M |      |                |  25.0 ms |                  | 151.0 MB |
+| build                  |                  1.67G | 167.2M | 10.0× |        63.1 ms |  12.3 ms |         237.8 MB | 156.2 MB |
+| cold start             |                  7.04G | 4.28G | 1.6× |       219.1 ms |  94.6 ms |         232.8 MB | 120.7 MB |
+| HMR                    |                 287.0M | 18.8M | 15.3× |        15.1 ms |   1.1 ms |         275.3 MB | 106.6 MB |
+| HMR, no new class      |                   5.0M |  3.7M | 1.3× |         149 µs |   136 µs |         170.2 MB |  95.1 MB |
+| canonicalize, cold     |                 32.78G | 1.17G | 28.0× |      1475.7 ms |  29.6 ms |         821.7 MB | 106.6 MB |
+| canonicalize, warm     |                 219.9M |  1.2M | 184.7× |         9.8 ms |    68 µs |         422.0 MB |  85.3 MB |
 
 Tailwind has no scan cache, so `scan, cached` has no counterpart.
 
@@ -34,11 +34,11 @@ shadcn/ui `cn`) and [`cn`](https://github.com/shadcn-ui/cn) 0.2.6.
 
 |                              | clsx + tailwind-merge |      cn | orisu/cn |
 | ---------------------------- | --------------------: | ------: | -------: |
-| Instructions per call        |                 35.0k |   13.8k |    10.3k |
-| Time per call                |               1.51 µs | 0.52 µs |  0.29 µs |
-| Instructions, each call once |                137.2M |  222.4M |   107.4M |
-| Time, each call once         |                5.2 ms |  7.4 ms |   3.5 ms |
-| Retained JS heap             |                1.4 MB |  890 KB |   596 KB |
+| Instructions per call        |                 34.7k |   13.8k |    10.0k |
+| Time per call                |               1.48 µs | 0.51 µs |  0.26 µs |
+| Instructions, each call once |                139.2M |  224.1M |   105.4M |
+| Time, each call once         |                5.3 ms |  7.4 ms |   3.4 ms |
+| Retained JS heap             |                1.4 MB |  881 KB |   812 KB |
 | Bundle, minified             |               27.1 KB | 25.4 KB |  36.5 KB |
 | Bundle, gzip                 |                8.5 KB | 10.4 KB |  14.0 KB |
 

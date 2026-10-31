@@ -10,7 +10,7 @@ use std::{
 use crate::{
     gitignore::{self, Gitignore, GitignoreBuilder},
     overrides::{self, Override},
-    pathutil::{is_hidden, strip_prefix},
+    pathutil::{is_hidden, path_starts_with, strip_prefix},
     types::{self, Types},
     walk::DirEntry,
     {Error, Match, PartialErrorBuilder},
@@ -382,7 +382,7 @@ impl Ignore {
             }
         }
         for gi in self.0.explicit_ignores.iter().rev() {
-            if !path.starts_with(gi.path()) {
+            if !path_starts_with(path, gi.path()) {
                 continue;
             }
             if !m_explicit.is_none() {

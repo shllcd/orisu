@@ -9,6 +9,11 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+### Changed
+
+- Scanning is faster and uses less memory: each file is read, extracted and dropped in one pass, candidates go into one set per thread instead of one per line, and source paths are matched by bytes. On the shadcn/ui docs a scan takes 81.5 ms instead of 106.1 ms (4.10G instead of 4.87G instructions) and peaks at 104.5 MB instead of 122.8 MB, with the same candidates.
+- `Scanner.files` lists the files without reading them, and `orisu check` no longer extracts candidates just to find the files to check.
+
 ### Fixed
 
 - `translate-*`, `translate-x-*`, `translate-y-*` and `translate-z-*` with a theme, fraction or arbitrary value (e.g. `-translate-x-1/2`) emit the `@property --tw-translate-*` rules again. Without them the unset axis was invalid and `translate` was dropped.

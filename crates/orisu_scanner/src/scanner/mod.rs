@@ -13,7 +13,7 @@ use crate::scanner::sources::{PublicSourceEntry, SourceEntry, Sources, public_so
 use auto_source_detection::BINARY_EXTENSIONS_GLOB;
 use bstr::ByteSlice;
 use fast_glob::glob_match;
-use orisu_ignore::{WalkBuilder, gitignore::GitignoreBuilder};
+use orisu_ignore::{WalkBuilder, gitignore::GitignoreBuilder, path_starts_with};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
@@ -125,9 +125,10 @@ impl Scanner {
         self.sources_scanned = false;
 
         let prune = !self.has_scanned_once;
-        let (scanned_blobs, css_files, files, extracted) = self.discover_sources();
+        let (content_paths, css_files, files, mut extracted) = self.discover_sources();
 
-        self.extract_candidates(scanned_blobs, css_files, extracted);
+        extracted.extend(extract_files(content_paths, self.attributify.as_ref()));
+        self.extract_candidates(vec![], css_files, extracted);
         self.scanned_files = files;
         if let Some(cache) = &mut self.cache {
             let _ = cache.save(prune);
@@ -322,8 +323,9 @@ impl Scanner {
             .collect()
     }
 
-    /// Content blobs to extract, CSS files, the changed files and candidates already extracted from caches and manifests.
-    fn discover_sources(&mut self) -> (Vec<Vec<u8>>, Vec<PathBuf>, Vec<String>, FxHashSet<String>) {
+    /// Content files to extract with their extensions, CSS files, the changed files and candidates already extracted from
+    /// caches and manifests.
+    fn discover_sources(&mut self) -> (Vec<ContentFile>, Vec<PathBuf>, Vec<String>, FxHashSet<String>) {
         if self.sources_scanned {
             return Default::default();
         }
@@ -389,19 +391,12 @@ impl Scanner {
         self.mtimes.retain(|path, _| self.files.contains(path));
 
         let mut extracted: FxHashSet<String> = manifest_paths.iter().flat_map(|path| manifest::read(path)).collect();
-        let scanned_blobs: Vec<Vec<u8>> = match &mut self.cache {
+        let content_paths = match &mut self.cache {
             Some(cache) => {
                 extracted.extend(extract_cached(cache, content_paths, self.attributify.as_ref()));
                 vec![]
             }
-            None => content_paths
-                .into_par_iter()
-                .filter_map(|(path, ext, _)| {
-                    let content = std::fs::read(&path).ok()?;
-                    let processed = expand_variant_groups(pre_process_input(content, &ext));
-                    if processed.is_empty() { None } else { Some(processed) }
-                })
-                .collect(),
+            None => content_paths.into_iter().map(|(path, ext, _)| (path, ext)).collect(),
         };
 
         if !self.has_scanned_once {
@@ -410,7 +405,7 @@ impl Scanner {
 
         changed_files.par_sort_unstable();
 
-        (scanned_blobs, css_files, changed_files, extracted)
+        (content_paths, css_files, changed_files, extracted)
     }
 }
 
@@ -459,6 +454,40 @@ fn extract_cached(cache: &mut Cache, files: Vec<(PathBuf, String, Option<Stat>)>
         cache.remember(path, stat, key);
     }
     out
+}
+
+/// Candidates of `files`, each read, extracted and dropped in one pass so that only the files in flight are in memory.
+fn extract_files(files: Vec<ContentFile>, attributify: Option<&Attributify>) -> FxHashSet<String> {
+    files
+        .into_par_iter()
+        .fold(FxHashSet::default, |mut set: FxHashSet<String>, (path, extension)| {
+            let Ok(content) = std::fs::read(&path) else {
+                return set;
+            };
+            let blob = expand_variant_groups(pre_process_input(content, &extension));
+            for line in blob.split(|x| *x == b'\n').filter(|line| !line.is_empty()) {
+                for extracted in Extractor::new(line).extract() {
+                    let (Extracted::Candidate(bytes) | Extracted::CssVariable(bytes)) = extracted;
+                    let Ok(candidate) = std::str::from_utf8(bytes) else {
+                        continue;
+                    };
+                    if !set.contains(candidate) {
+                        set.insert(candidate.to_owned());
+                    }
+                }
+            }
+            if let Some(attributify) = attributify {
+                attributify.extract(&blob, &mut set);
+            }
+            set
+        })
+        .reduce(FxHashSet::default, |mut a, mut b| {
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
+            a.extend(b);
+            a
+        })
 }
 
 fn read_changed_content(c: ChangedContent) -> Option<Vec<u8>> {
@@ -516,22 +545,19 @@ where
     blobs
         .par_iter()
         .flat_map(|blob| blob.par_split(|x| *x == b'\n'))
-        .filter_map(|blob| {
-            if blob.is_empty() {
-                return None;
+        .fold(FxHashSet::default, |mut set, blob| {
+            if !blob.is_empty() {
+                set.extend(handle(crate::extractor::Extractor::new(blob)).into_iter().map(|x| match x {
+                    Extracted::Candidate(bytes) => bytes,
+                    Extracted::CssVariable(bytes) => bytes,
+                }));
             }
-
-            let extracted = handle(crate::extractor::Extractor::new(blob));
-            if extracted.is_empty() {
-                return None;
-            }
-
-            Some(FxHashSet::from_iter(extracted.into_iter().map(|x| match x {
-                Extracted::Candidate(bytes) => bytes,
-                Extracted::CssVariable(bytes) => bytes,
-            })))
+            set
         })
-        .reduce(Default::default, |mut a, b| {
+        .reduce(Default::default, |mut a, mut b| {
+            if a.len() < b.len() {
+                std::mem::swap(&mut a, &mut b);
+            }
             a.extend(b);
             a
         })
@@ -541,6 +567,9 @@ where
 }
 
 type WalkEntry = (PathBuf, bool, String, Option<Stat>);
+
+/// A content file and its extension.
+type ContentFile = (PathBuf, String);
 
 fn walk_parallel(walker: &mut WalkBuilder) -> Vec<WalkEntry> {
     struct FlushOnDrop {
@@ -703,7 +732,7 @@ fn create_walker(sources: &Sources) -> Option<WalkBuilder> {
             let mut matches = false;
 
             for base in &auto_bases {
-                if path.starts_with(base) {
+                if path_starts_with(path, base) {
                     matches = true;
                     break;
                 }

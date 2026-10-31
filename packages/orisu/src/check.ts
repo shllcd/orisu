@@ -29,7 +29,6 @@ const scannedFiles = async (entry: string): Promise<string[]> => {
     root === "none" ? [] : root === null ? [{ base, pattern: "**/*", negated: false }] : [{ ...root, negated: false }];
   sources.push(...compiler.sources);
   const scanner = new Scanner({ sources, attributify: compiler.attributify });
-  scanner.scan();
   return scanner.files.filter((file) => !file.endsWith(".css"));
 };
 
