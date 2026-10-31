@@ -55,6 +55,7 @@ pub fn is_normal_path(path: &Path) -> bool {
         && memmem::find(bytes, b"/./").is_none()
 }
 
+/// Whether [`Path::components`] keeps every byte of `path`, so that prefixes of such paths can be compared as bytes.
 #[cfg(not(unix))]
 pub fn is_normal_path(_: &Path) -> bool {
     false
@@ -79,6 +80,7 @@ pub fn path_starts_with(path: &Path, prefix: &Path, normal: bool) -> bool {
     }
 }
 
+/// Same as [`Path::starts_with`]; `normal` says that both paths pass [`is_normal_path`], which lets it compare bytes.
 #[cfg(not(unix))]
 pub fn path_starts_with(path: &Path, prefix: &Path, _: bool) -> bool {
     path.starts_with(prefix)
