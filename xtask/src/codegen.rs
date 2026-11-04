@@ -2,7 +2,9 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use orisu_compiler::compiler::features;
 use orisu_diagnostics::CATALOG;
+use orisu_optimizer::polyfills;
 
 /// Writes every generated file, or with `--check` fails when one is stale.
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -11,6 +13,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let outputs = [
         (root.join("packages/orisu/skills/orisu-diagnostics/SKILL.md"), orisu_diagnostics::render_skill()),
         (root.join("packages/orisu/src/codes.ts"), codes()),
+        (root.join("packages/orisu/src/flags.ts"), flags()),
     ];
     let mut stale: Vec<&PathBuf> = Vec::new();
     for (path, content) in &outputs {
@@ -41,4 +44,38 @@ fn codes() -> String {
     out.pop();
     out.push_str(";\n");
     out
+}
+
+fn flags() -> String {
+    let mut out = String::new();
+    flag_object(
+        &mut out,
+        "What a compiled stylesheet uses, from `orisu_compiler::compiler::features`.",
+        "Features",
+        &[
+            ("None", features::NONE),
+            ("AtApply", features::AT_APPLY),
+            ("AtImport", features::AT_IMPORT),
+            ("ThemeFunction", features::THEME_FUNCTION),
+            ("Utilities", features::UTILITIES),
+            ("Variants", features::VARIANTS),
+            ("AtTheme", features::AT_THEME),
+        ],
+    );
+    out.push('\n');
+    flag_object(
+        &mut out,
+        "Polyfills the compiler emits, from `orisu_optimizer::polyfills`.",
+        "Polyfills",
+        &[("None", polyfills::NONE), ("AtProperty", polyfills::AT_PROPERTY), ("ColorMix", polyfills::COLOR_MIX), ("All", polyfills::ALL)],
+    );
+    out
+}
+
+fn flag_object(out: &mut String, doc: &str, name: &str, flags: &[(&str, u8)]) {
+    let _ = writeln!(out, "/** {doc} */\nexport const {name} = {{");
+    for (flag, value) in flags {
+        let _ = writeln!(out, "  {flag}: {value},");
+    }
+    out.push_str("} as const;\n");
 }

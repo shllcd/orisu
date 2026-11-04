@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { DiagnosticCode } from "./codes.ts";
 
 export type { DiagnosticCode } from "./codes.ts";
+export { Features, Polyfills } from "./flags.ts";
 
 export interface ChangedContent {
   file?: string;

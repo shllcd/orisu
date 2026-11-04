@@ -1909,6 +1909,7 @@ dependencies = [
  "orisu_compat_tailwind",
  "orisu_compiler",
  "orisu_diagnostics",
+ "orisu_optimizer",
 ]
 
 [[package]]
