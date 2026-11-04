@@ -80,17 +80,17 @@ fn compile_one(dir: &Path, name: &str) -> (String, std::vec::Vec<(&'static str, 
     let output = compiler.build(candidates.split_whitespace()).to_owned();
     let mut extra = std::vec::Vec::new();
     if let Ok(list) = fs::read_to_string(dir.join(format!("{name}.canon"))) {
-        let mut canonicalizer = Canonicalizer::new(&compiler.design_system, compiler.alloc());
+        let mut canonicalizer = Canonicalizer::new(compiler.alloc());
         let list: Vec<&str> = list.split_whitespace().collect();
         let mut out = String::new();
         for options in [CanonicalizeOptions::default(), CanonicalizeOptions { rem: Some(16.0), ..CanonicalizeOptions::default() }] {
             for candidate in &list {
-                out.push_str(&canonicalizer.canonicalize(&[candidate], &options).join(" "));
+                out.push_str(&canonicalizer.canonicalize(&compiler.design_system, &[candidate], &options).join(" "));
                 out.push('\n');
             }
         }
         let collapse = CanonicalizeOptions { rem: Some(16.0), collapse: true, ..CanonicalizeOptions::default() };
-        out.push_str(&canonicalizer.canonicalize(&list[..list.len().min(COLLAPSED)], &collapse).join(" "));
+        out.push_str(&canonicalizer.canonicalize(&compiler.design_system, &list[..list.len().min(COLLAPSED)], &collapse).join(" "));
         out.push('\n');
         extra.push(("canon", out));
     }

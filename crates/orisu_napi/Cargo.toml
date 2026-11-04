@@ -23,6 +23,7 @@ orisu_registry.workspace = true
 orisu_scanner.workspace = true
 napi = { version = "3.13", default-features = false, features = ["napi4", "dyn-symbols"] }
 napi-derive = "3.6"
+self_cell.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
 rustc-hash.workspace = true

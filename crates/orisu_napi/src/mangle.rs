@@ -128,17 +128,19 @@ impl Compiler {
     pub fn mangle(&mut self, input: MangleInput, options: Option<MangleOptions>) -> Result<ManglePlan> {
         let options = options.unwrap_or_default().core()?;
         let files: Vec<PathBuf> = input.files.into_iter().map(PathBuf::from).collect();
-        let inline = self.inner.inline_candidates.clone();
-        let core_input = orisu_mangle::Input {
-            files: &files,
-            entry: Path::new(&input.entry),
-            candidates: &input.candidates,
-            css: &input.css,
-            inline: &inline,
-        };
-        let prefix = self.inner.design_system.theme.prefix().map(str::to_owned);
-        let plan = orisu_mangle::plan(&mut Merger::new(self.inner.session()), &core_input, &options);
-        Ok(ManglePlan { inner: plan, prefix })
+        self.with_mut(|compiler| {
+            let inline = compiler.inline_candidates.clone();
+            let core_input = orisu_mangle::Input {
+                files: &files,
+                entry: Path::new(&input.entry),
+                candidates: &input.candidates,
+                css: &input.css,
+                inline: &inline,
+            };
+            let prefix = compiler.design_system.theme.prefix().map(str::to_owned);
+            let plan = orisu_mangle::plan(&mut Merger::new(compiler.session()), &core_input, &options);
+            Ok(ManglePlan { inner: plan, prefix })
+        })
     }
 }
 

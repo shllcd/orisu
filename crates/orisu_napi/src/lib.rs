@@ -12,11 +12,10 @@ use orisu_compiler::compiler::{self as core_compiler, Options, SourceRoot, Style
 use orisu_compiler::intellisense;
 use orisu_merge::Merger;
 use orisu_registry::utilities::UtilityKind;
-use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use utf16::IndexConverter;
 
-mod mangle;
+pub mod mangle;
 mod utf16;
 
 #[derive(Debug, Clone)]
@@ -216,23 +215,32 @@ pub struct MergeTable {
     pub names: Option<mangle::NameTable>,
 }
 
+struct State<'a> {
+    compiler: core_compiler::Compiler<'a>,
+    canonicalizer: Option<Canonicalizer<'a>>,
+}
+
+self_cell::self_cell!(
+    struct Arena {
+        owner: Allocator,
+        #[not_covariant]
+        dependent: State,
+    }
+);
+
 /// Owns the arena that the inner compiler borrows from.
 #[napi]
 pub struct Compiler {
-    canonicalizer: ManuallyDrop<Option<Canonicalizer<'static, 'static>>>,
-    inner: ManuallyDrop<Box<core_compiler::Compiler<'static>>>,
-    alloc: *mut Allocator,
+    arena: Arena,
 }
 
-impl Drop for Compiler {
-    fn drop(&mut self) {
-        // SAFETY: `canonicalizer` borrows the boxed compiler and `inner` borrows from `alloc`, so they are dropped in that
-        // order and never used again; `alloc` came from `Box::into_raw` in `compile` and is freed exactly once here.
-        unsafe {
-            ManuallyDrop::drop(&mut self.canonicalizer);
-            ManuallyDrop::drop(&mut self.inner);
-            drop(Box::from_raw(self.alloc));
-        }
+impl Compiler {
+    fn with<R>(&self, f: impl for<'a> FnOnce(&core_compiler::Compiler<'a>) -> R) -> R {
+        self.arena.with_dependent(|_, state| f(&state.compiler))
+    }
+
+    fn with_mut<R>(&mut self, f: impl for<'a> FnOnce(&mut core_compiler::Compiler<'a>) -> R) -> R {
+        self.arena.with_dependent_mut(|_, state| f(&mut state.compiler))
     }
 }
 
@@ -247,9 +255,6 @@ type LoadFn<'f> = Function<'f, FnArgs<(String, String)>, LoadedStylesheet>;
 /// Throws errors whose `code` is a diagnostic code such as `INVALID_STYLESHEET`.
 #[napi]
 pub fn compile(css: String, options: Option<CompileOptions>, load_stylesheet: Option<LoadFn<'_>>) -> Result<Compiler, &'static str> {
-    let alloc = Box::into_raw(Box::new(Allocator::new()));
-    // SAFETY: the arena lives until `Compiler::drop`, which drops the borrowing compiler first.
-    let arena: &'static Allocator = unsafe { &*alloc };
     let options = options.unwrap_or(CompileOptions { base: None, polyfills: None });
     let base = options.base.unwrap_or_default();
     let mut opts = Options { base: &base, ..Options::default() };
@@ -263,15 +268,11 @@ pub fn compile(css: String, options: Option<CompileOptions>, load_stylesheet: Op
                 .map_err(|e| e.reason.clone())
         }));
     }
-    opts.extension = Some(&Tailwind);
-    match core_compiler::compile(arena.alloc_str(&css), arena, opts) {
-        Ok(inner) => Ok(Compiler { canonicalizer: ManuallyDrop::new(None), inner: ManuallyDrop::new(Box::new(inner)), alloc }),
-        Err(err) => {
-            // SAFETY: nothing borrows the arena once compilation failed.
-            unsafe { drop(Box::from_raw(alloc)) };
-            Err(Error::new(err.code.name(), err.message))
-        }
-    }
+    let arena = Arena::try_new(Allocator::new(), |alloc| {
+        core_compiler::compile(alloc.alloc_str(&css), alloc, Options { extension: Some(&Tailwind), ..opts })
+            .map(|compiler| State { compiler, canonicalizer: None })
+    });
+    arena.map(|arena| Compiler { arena }).map_err(|error| Error::new(error.code.name(), error.message))
 }
 
 #[napi]
@@ -279,72 +280,76 @@ impl Compiler {
     /// The CSS for everything seen so far, `null` when it is unchanged since the previous call.
     #[napi]
     pub fn build_changed(&mut self, candidates: Vec<String>) -> Option<String> {
-        self.inner.build_changed(candidates.iter().map(String::as_str)).map(str::to_owned)
+        self.with_mut(|c| c.build_changed(candidates.iter().map(String::as_str)).map(str::to_owned))
     }
 
     #[napi(getter)]
     pub fn features(&self) -> u32 {
-        u32::from(self.inner.features)
+        self.with(|c| u32::from(c.features))
     }
 
     /// The `@attributify` options, `null` without one.
     #[napi(getter)]
     pub fn attributify(&self) -> Option<AttributifyOptions> {
-        self.inner.design_system.attributify.map(|a| AttributifyOptions { prefix: a.prefix.to_owned(), prefixed_only: a.prefixed_only })
+        self.with(|c| {
+            c.design_system.attributify.map(|a| AttributifyOptions { prefix: a.prefix.to_owned(), prefixed_only: a.prefixed_only })
+        })
     }
 
     #[napi(getter)]
     pub fn sources(&self) -> Vec<CompilerSource> {
-        self.inner
-            .sources
-            .iter()
-            .map(|s| CompilerSource { base: s.base.to_owned(), pattern: s.pattern.to_owned(), negated: s.negated })
-            .collect()
+        self.with(|c| {
+            c.sources
+                .iter()
+                .map(|s| CompilerSource { base: s.base.to_owned(), pattern: s.pattern.to_owned(), negated: s.negated })
+                .collect()
+        })
     }
 
     /// `null` when no `source(…)` was given, the string `"none"` for `source(none)`.
     #[napi(getter, ts_return_type = "null | 'none' | CompilerRoot")]
     pub fn root(&self) -> napi::Either<Option<&'static str>, CompilerRoot> {
-        match self.inner.root {
+        self.with(|c| match c.root {
             None => napi::Either::A(None),
             Some(SourceRoot::Disabled) => napi::Either::A(Some("none")),
             Some(SourceRoot::Path { base, pattern }) => {
                 napi::Either::B(CompilerRoot { base: base.to_owned(), pattern: pattern.to_owned() })
             }
-        }
+        })
     }
 
     #[napi]
     pub fn candidates_to_css(&mut self, classes: Vec<String>) -> Vec<Option<String>> {
         let classes: Vec<&str> = classes.iter().map(String::as_str).collect();
-        self.inner.session().candidates_to_css(&classes)
+        self.with_mut(|c| c.session().candidates_to_css(&classes))
     }
 
     #[napi]
     pub fn get_class_order(&mut self, classes: Vec<String>) -> Vec<Option<i64>> {
         let classes: Vec<&str> = classes.iter().map(String::as_str).collect();
-        self.inner.session().class_order(&classes).into_iter().map(|(_, o)| o.map(|o| o as i64)).collect()
+        self.with_mut(|c| c.session().class_order(&classes).into_iter().map(|(_, o)| o.map(|o| o as i64)).collect())
     }
 
     #[napi]
     pub fn get_class_list(&self) -> Vec<ClassEntry> {
-        intellisense::class_list(&self.inner.design_system)
-            .into_iter()
-            .map(|c| ClassEntry { name: c.name, modifiers: c.modifiers })
-            .collect()
+        self.with(|c| {
+            intellisense::class_list(&c.design_system).into_iter().map(|c| ClassEntry { name: c.name, modifiers: c.modifiers }).collect()
+        })
     }
 
     #[napi]
     pub fn get_variants(&self) -> Vec<VariantEntry> {
-        intellisense::variants(&self.inner.design_system)
-            .into_iter()
-            .map(|v| VariantEntry { name: v.name.to_owned(), is_arbitrary: v.is_arbitrary, values: v.values, has_dash: v.has_dash })
-            .collect()
+        self.with(|c| {
+            intellisense::variants(&c.design_system)
+                .into_iter()
+                .map(|v| VariantEntry { name: v.name.to_owned(), is_arbitrary: v.is_arbitrary, values: v.values, has_dash: v.has_dash })
+                .collect()
+        })
     }
 
     #[napi]
     pub fn get_variant_selectors(&mut self, root: String, value: Option<String>, modifier: Option<String>) -> Vec<String> {
-        intellisense::variant_selectors(&mut self.inner.session(), &root, value.as_deref(), modifier.as_deref())
+        self.with_mut(|c| intellisense::variant_selectors(&mut c.session(), &root, value.as_deref(), modifier.as_deref()))
     }
 
     #[napi]
@@ -355,74 +360,82 @@ impl Compiler {
             collapse: o.collapse.unwrap_or(false),
             logical_to_physical: o.logical_to_physical.unwrap_or(false),
         });
-        let canonicalizer = self.canonicalizer.get_or_insert_with(|| {
-            // SAFETY: the compiler is boxed, so the design system stays put until `Compiler::drop`, which drops this first.
-            let ds: &'static orisu_compiler::design_system::DesignSystem<'static> =
-                unsafe { &*std::ptr::from_ref(&self.inner.design_system) };
-            Canonicalizer::new(ds, self.inner.alloc())
-        });
-        canonicalizer.canonicalize(&candidates, &options)
+        self.arena.with_dependent_mut(|alloc, state| {
+            state.canonicalizer.get_or_insert_with(|| Canonicalizer::new(alloc)).canonicalize(
+                &state.compiler.design_system,
+                &candidates,
+                &options,
+            )
+        })
     }
 
     /// Prints every parse of each candidate in canonical form.
     #[napi]
     pub fn print_candidates(&mut self, classes: Vec<String>) -> Vec<Vec<String>> {
-        let mut ds = self.inner.session();
-        classes.iter().map(|c| ds.parse_candidate(c).1.iter().map(|p| print_candidate(p, ds.theme.prefix())).collect()).collect()
+        self.with_mut(|c| {
+            let mut ds = c.session();
+            classes.iter().map(|c| ds.parse_candidate(c).1.iter().map(|p| print_candidate(p, ds.theme.prefix())).collect()).collect()
+        })
     }
 
     #[napi(getter)]
     pub fn prefix(&self) -> Option<String> {
-        self.inner.design_system.theme.prefix().map(str::to_owned)
+        self.with(|c| c.design_system.theme.prefix().map(str::to_owned))
     }
 
     #[napi(getter)]
     pub fn important(&self) -> bool {
-        self.inner.design_system.important
+        self.with(|c| c.design_system.important)
     }
 
     #[napi(getter)]
     pub fn invalid_candidates(&self) -> Vec<String> {
-        self.inner.design_system.invalid_candidates.iter().map(|c| (*c).to_owned()).collect()
+        self.with(|c| c.design_system.invalid_candidates.iter().map(|c| (*c).to_owned()).collect())
     }
 
     #[napi]
     pub fn theme_entries(&mut self) -> Vec<ThemeEntry> {
-        let ds = self.inner.session();
-        ds.theme
-            .entries(ds.alloc)
-            .map(|(key, value)| ThemeEntry { key: key.to_owned(), value: value.value.to_owned(), options: u32::from(value.options) })
-            .collect()
+        self.with_mut(|c| {
+            let ds = c.session();
+            ds.theme
+                .entries(ds.alloc)
+                .map(|(key, value)| ThemeEntry { key: key.to_owned(), value: value.value.to_owned(), options: u32::from(value.options) })
+                .collect()
+        })
     }
 
     #[napi]
     pub fn resolve_theme_value(&mut self, path: String, force_inline: Option<bool>) -> Option<String> {
-        self.inner.session().resolve_theme_value(&path, force_inline.unwrap_or(true)).map(str::to_owned)
+        self.with_mut(|c| c.session().resolve_theme_value(&path, force_inline.unwrap_or(true)).map(str::to_owned))
     }
 
     #[napi]
     pub fn utility_names(&self) -> Vec<String> {
-        let utilities = &self.inner.design_system.utilities;
-        let mut names: Vec<String> = utilities.keys(UtilityKind::Static).map(str::to_owned).collect();
-        names.extend(utilities.keys(UtilityKind::Functional).map(str::to_owned));
-        names
+        self.with(|c| {
+            let utilities = &c.design_system.utilities;
+            let mut names: Vec<String> = utilities.keys(UtilityKind::Static).map(str::to_owned).collect();
+            names.extend(utilities.keys(UtilityKind::Functional).map(str::to_owned));
+            names
+        })
     }
 
     #[napi]
     pub fn variant_names(&self) -> Vec<String> {
-        self.inner.design_system.variants.keys().map(str::to_owned).collect()
+        self.with(|c| c.design_system.variants.keys().map(str::to_owned).collect())
     }
 
     #[napi]
     pub fn merge(&mut self, classes: Vec<String>) -> String {
-        Merger::new(self.inner.session()).merge(classes.iter().map(String::as_str))
+        self.with_mut(|c| Merger::new(c.session()).merge(classes.iter().map(String::as_str)))
     }
 
     #[napi]
     pub fn merge_table(&mut self, classes: Vec<String>) -> MergeTable {
-        let table = Merger::new(self.inner.session()).table(classes.iter().map(String::as_str));
-        let (keys, values) = table.entries.into_iter().unzip();
-        MergeTable { prefix: self.inner.design_system.theme.prefix().map(str::to_owned), keys, values, erases: table.erases, names: None }
+        self.with_mut(|c| {
+            let table = Merger::new(c.session()).table(classes.iter().map(String::as_str));
+            let (keys, values) = table.entries.into_iter().unzip();
+            MergeTable { prefix: c.design_system.theme.prefix().map(str::to_owned), keys, values, erases: table.erases, names: None }
+        })
     }
 }
 

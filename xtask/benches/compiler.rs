@@ -42,7 +42,7 @@ fn canonicalize_every_class(bencher: Bencher) {
     let alloc = Allocator::new();
     let compiler = compiler(&alloc);
     bencher.bench_local(|| {
-        let mut canonicalizer = Canonicalizer::new(&compiler.design_system, &alloc);
-        divan::black_box(canonicalizer.canonicalize(&classes, &CanonicalizeOptions::default()));
+        let mut canonicalizer = Canonicalizer::new(&alloc);
+        divan::black_box(canonicalizer.canonicalize(&compiler.design_system, &classes, &CanonicalizeOptions::default()));
     });
 }

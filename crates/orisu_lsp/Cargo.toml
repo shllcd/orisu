@@ -21,6 +21,7 @@ orisu_scanner.workspace = true
 orisu_ignore.workspace = true
 orisu_diagnostics.workspace = true
 rustc-hash.workspace = true
+self_cell.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 crossbeam-channel = "0.5"

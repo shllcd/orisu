@@ -21,7 +21,7 @@ use orisu_parser::infer::{format_js_number, is_multiple_of_quarter};
 use orisu_parser::segment::segment;
 use orisu_registry::utilities::UtilityKind;
 use rayon::prelude::*;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::sync::Arc;
 use utility::{UTILITY_PASSES, is_valid_spacing_number};
@@ -66,14 +66,8 @@ impl Signature {
 }
 
 fn hash_signature(css: &str) -> Signature {
-    use std::hash::{Hash, Hasher};
-    let mut first = FxHasher::default();
-    0u8.hash(&mut first);
-    css.hash(&mut first);
-    let mut second = FxHasher::default();
-    1u8.hash(&mut second);
-    css.as_bytes().hash(&mut second);
-    let hash = (((first.finish() as u128) << 64) | second.finish() as u128) & ((1u128 << 127) - 1);
+    let digest = blake3::hash(css.as_bytes());
+    let hash = u128::from_le_bytes(digest.as_bytes()[..16].try_into().expect("a blake3 digest has 32 bytes")) & ((1u128 << 127) - 1);
     Signature(if hash == 0 { 1 } else { hash })
 }
 
@@ -123,19 +117,19 @@ pub(crate) struct Canon<'a, 'd> {
 }
 
 /// Canonicalizes candidates against one design system, caching per option set so results never depend on call order.
-pub struct Canonicalizer<'a, 'd> {
-    ds: &'d DesignSystem<'a>,
+pub struct Canonicalizer<'a> {
     alloc: &'a Allocator,
     caches: Caches<'a>,
     storage: Storage<'a>,
 }
 
-impl<'a, 'd> Canonicalizer<'a, 'd> {
-    pub fn new(ds: &'d DesignSystem<'a>, alloc: &'a Allocator) -> Self {
-        Self { ds, alloc, caches: Caches::default(), storage: Storage::default() }
+impl<'a> Canonicalizer<'a> {
+    pub fn new(alloc: &'a Allocator) -> Self {
+        Self { alloc, caches: Caches::default(), storage: Storage::default() }
     }
 
-    pub fn canonicalize(&mut self, candidates: &[&str], options: &CanonicalizeOptions) -> std::vec::Vec<String> {
+    /// `ds` must be the design system of every earlier call, as results are cached across calls.
+    pub fn canonicalize(&mut self, ds: &DesignSystem<'a>, candidates: &[&str], options: &CanonicalizeOptions) -> std::vec::Vec<String> {
         let mut features = 0;
         if options.collapse {
             features |= features::EXPAND_PROPERTIES;
@@ -145,7 +139,7 @@ impl<'a, 'd> Canonicalizer<'a, 'd> {
         }
         let sig = SigOpts { rem: options.rem, features };
         let mut cx =
-            Canon { ds: Session::new(self.ds, self.alloc, &mut self.caches), storage: &mut self.storage, sig, collapse: options.collapse };
+            Canon { ds: Session::new(ds, self.alloc, &mut self.caches), storage: &mut self.storage, sig, collapse: options.collapse };
         let result: Set<&str> = candidates.iter().map(|c| cx.canonicalize_candidate(c)).collect();
         if result.len() <= 1 || !options.collapse {
             return result.into_iter().map(str::to_owned).collect();
@@ -281,9 +275,6 @@ impl<'a, 'd> Canon<'a, 'd> {
     fn prefill_root_properties(&mut self, key: SigKey) {
         let roots: std::vec::Vec<&'a str> = self.ds.ds.utilities.keys(UtilityKind::Functional).collect();
         let (ds, options, sig, collapse) = (self.ds.ds, self.ds.options, self.sig, self.collapse);
-        // SAFETY: `DesignSystem` has no interior mutability and is only read through `&`, so nothing allocated in the
-        // shorter-lived worker arena can be stored into it; this only narrows the lifetime as covariance would.
-        let ds = unsafe { std::mem::transmute::<&DesignSystem<'a>, &DesignSystem<'_>>(ds) };
         let results: std::vec::Vec<std::vec::Vec<Option<std::vec::Vec<String>>>> = roots
             .par_chunks(32)
             .map(|chunk| {
@@ -445,9 +436,6 @@ impl<'a, 'd> Canon<'a, 'd> {
         let key = self.sig_key();
         let missing: std::vec::Vec<&str> = utilities.iter().map(AsRef::as_ref).collect();
         let (ds, options, sig, collapse) = (self.ds.ds, self.ds.options, self.sig, self.collapse);
-        // SAFETY: `DesignSystem` has no interior mutability and is only read through `&`, so nothing allocated in the
-        // shorter-lived worker arena can be stored into it; this only narrows the lifetime as covariance would.
-        let ds = unsafe { std::mem::transmute::<&DesignSystem<'a>, &DesignSystem<'_>>(ds) };
         let signatures: std::vec::Vec<Option<Signature>> = missing
             .par_chunks(1024)
             .flat_map_iter(|chunk| {

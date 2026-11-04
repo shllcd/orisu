@@ -10,7 +10,6 @@ use orisu_compiler::intellisense::{self, ClassEntry};
 use orisu_scanner::attributify::Attributify;
 use rustc_hash::FxHashMap;
 use std::cell::{Cell, OnceCell, RefCell};
-use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -34,10 +33,7 @@ pub struct Project {
     pub dir: PathBuf,
     pub dependencies: Vec<PathBuf>,
     pub attributify: Option<Attributify>,
-    canonicalizer: ManuallyDrop<RefCell<Option<Canonicalizer<'static, 'static>>>>,
-    compiler: ManuallyDrop<Box<Compiler<'static>>>,
-    caches: RefCell<Caches<'static>>,
-    alloc: *mut Allocator,
+    arena: Arena,
     variables: FxHashMap<String, String>,
     classes: OnceCell<Vec<ClassEntry>>,
     variants: OnceCell<Vec<VariantItem>>,
@@ -47,17 +43,19 @@ pub struct Project {
     canonical_ready: Cell<bool>,
 }
 
-impl Drop for Project {
-    fn drop(&mut self) {
-        // SAFETY: `canonicalizer` borrows the boxed compiler and `compiler` borrows from `alloc`, so they are
-        // dropped in that order and never used again; `alloc` came from `Box::into_raw` in `load` and is freed exactly once here.
-        unsafe {
-            ManuallyDrop::drop(&mut self.canonicalizer);
-            ManuallyDrop::drop(&mut self.compiler);
-            drop(Box::from_raw(self.alloc));
-        }
-    }
+struct State<'a> {
+    compiler: Compiler<'a>,
+    caches: RefCell<Caches<'a>>,
+    canonicalizer: RefCell<Option<Canonicalizer<'a>>>,
 }
+
+self_cell::self_cell!(
+    struct Arena {
+        owner: Allocator,
+        #[not_covariant]
+        dependent: State,
+    }
+);
 
 #[derive(Default)]
 struct Loaded {
@@ -82,30 +80,24 @@ impl Project {
             Ok(Stylesheet { path: path.to_string_lossy().into_owned(), base, content })
         };
         let base = dir.to_string_lossy();
-        let options = Options { base: &base, load_stylesheet: Some(Box::new(load)), extension: Some(&Tailwind), ..Options::default() };
-        let alloc = Box::into_raw(Box::new(Allocator::new()));
-        // SAFETY: the arena lives until `Project::drop`, which drops the borrowing compiler first.
-        let arena: &'static Allocator = unsafe { &*alloc };
-        let compiler = match compiler::compile(arena.alloc_str(&css), arena, options) {
-            Ok(compiler) => compiler,
-            Err(err) => {
-                // SAFETY: nothing borrows the arena once compilation failed.
-                unsafe { drop(Box::from_raw(alloc)) };
-                return Err(err);
-            }
-        };
-        let attributify =
-            compiler.design_system.attributify.map(|a| Attributify { prefix: a.prefix.to_owned(), prefixed_only: a.prefixed_only });
+        let arena = Arena::try_new(Allocator::new(), |alloc| {
+            let options = Options { base: &base, load_stylesheet: Some(Box::new(load)), extension: Some(&Tailwind), ..Options::default() };
+            compiler::compile(alloc.alloc_str(&css), alloc, options).map(|compiler| State {
+                compiler,
+                caches: RefCell::default(),
+                canonicalizer: RefCell::default(),
+            })
+        })?;
+        let attributify = arena.with_dependent(|_, state| {
+            state.compiler.design_system.attributify.map(|a| Attributify { prefix: a.prefix.to_owned(), prefixed_only: a.prefixed_only })
+        });
         let Loaded { dependencies, variables } = std::mem::take(&mut *loaded.borrow_mut());
         Ok(Self {
             entry: entry.to_path_buf(),
             dir,
             dependencies,
             attributify,
-            canonicalizer: ManuallyDrop::new(RefCell::new(None)),
-            compiler: ManuallyDrop::new(Box::new(compiler)),
-            caches: RefCell::default(),
-            alloc,
+            arena,
             variables,
             classes: OnceCell::new(),
             variants: OnceCell::new(),
@@ -116,40 +108,43 @@ impl Project {
         })
     }
 
-    pub fn ds(&self) -> &DesignSystem<'static> {
-        &self.compiler.design_system
+    fn with_ds<T>(&self, f: impl for<'a> FnOnce(&DesignSystem<'a>) -> T) -> T {
+        self.arena.with_dependent(|_, state| f(&state.compiler.design_system))
     }
 
-    fn with_session<T>(&self, f: impl FnOnce(&mut Session<'_, 'static>) -> T) -> T {
-        f(&mut Session::new(self.ds(), self.compiler.alloc(), &mut self.caches.borrow_mut()))
+    fn with_session<T>(&self, f: impl for<'s, 'a> FnOnce(&mut Session<'s, 'a>) -> T) -> T {
+        self.arena.with_dependent(|alloc, state| f(&mut Session::new(&state.compiler.design_system, alloc, &mut state.caches.borrow_mut())))
     }
 
     pub fn classes(&self) -> &[ClassEntry] {
-        self.classes.get_or_init(|| intellisense::class_list(self.ds()))
+        self.classes.get_or_init(|| self.with_ds(intellisense::class_list))
     }
 
     pub fn variants(&self) -> &[VariantItem] {
         self.variants.get_or_init(|| {
-            intellisense::variants(self.ds())
-                .into_iter()
-                .map(|v| VariantItem { name: v.name.to_owned(), values: v.values, has_dash: v.has_dash, is_arbitrary: v.is_arbitrary })
-                .collect()
+            self.with_ds(|ds| {
+                intellisense::variants(ds)
+                    .into_iter()
+                    .map(|v| VariantItem { name: v.name.to_owned(), values: v.values, has_dash: v.has_dash, is_arbitrary: v.is_arbitrary })
+                    .collect()
+            })
         })
     }
 
     /// Theme colors by name, such as `red-500`; a class ending in one sets that color.
     pub fn theme_colors(&self) -> &FxHashMap<String, Rgba> {
         self.theme_colors.get_or_init(|| {
-            let variable = |name: &str| self.variable(name);
-            let theme = &self.ds().theme;
-            theme
-                .keys_in_namespaces(["--color"])
-                .into_iter()
-                .filter_map(|name| {
-                    let value = theme.get_value(&format!("--color-{name}"))?.value;
-                    Some((name.to_owned(), color::parse(value, &variable)?))
-                })
-                .collect()
+            self.with_ds(|ds| {
+                let variable = |name: &str| self.variable(ds, name);
+                ds.theme
+                    .keys_in_namespaces(["--color"])
+                    .into_iter()
+                    .filter_map(|name| {
+                        let value = ds.theme.get_value(&format!("--color-{name}"))?.value;
+                        Some((name.to_owned(), color::parse(value, &variable)?))
+                    })
+                    .collect()
+            })
         })
     }
 
@@ -157,24 +152,27 @@ impl Project {
         if let Some(info) = self.infos.borrow().get(class) {
             return info.clone();
         }
-        let nodes = self.with_session(|ds| ds.candidates_to_ast(&[class])).into_iter().next().filter(|nodes| !nodes.is_empty());
-        let mut declarations = Vec::new();
-        if let Some(nodes) = &nodes {
-            collect_declarations(nodes, &mut declarations);
-        }
-        let variable = |name: &str| self.variable(name);
-        let color =
-            declarations.iter().filter(|(property, _)| is_color_property(property)).find_map(|(_, value)| color::parse(value, &variable));
-        let mut properties: Vec<String> = declarations.iter().map(|(property, _)| (*property).to_owned()).collect();
-        properties.sort_unstable();
-        properties.dedup();
-        let info = Rc::new(ClassInfo { css: nodes.map(|nodes| to_css(&nodes)), color, properties });
+        let info = Rc::new(self.with_session(|session| {
+            let nodes = session.candidates_to_ast(&[class]).into_iter().next().filter(|nodes| !nodes.is_empty());
+            let mut declarations = Vec::new();
+            if let Some(nodes) = &nodes {
+                collect_declarations(nodes, &mut declarations);
+            }
+            let variable = |name: &str| self.variable(session.ds, name);
+            let color = declarations
+                .iter()
+                .filter(|(property, _)| is_color_property(property))
+                .find_map(|(_, value)| color::parse(value, &variable));
+            let mut properties: Vec<String> = declarations.iter().map(|(property, _)| (*property).to_owned()).collect();
+            properties.sort_unstable();
+            properties.dedup();
+            ClassInfo { css: nodes.map(|nodes| to_css(&nodes)), color, properties }
+        }));
         self.infos.borrow_mut().insert(class.to_owned(), info.clone());
         info
     }
 
-    fn variable(&self, name: &str) -> Option<&str> {
-        let ds = self.ds();
+    fn variable<'s>(&'s self, ds: &'s DesignSystem<'_>, name: &str) -> Option<&'s str> {
         let unprefixed = ds.theme.prefix().and_then(|p| name.strip_prefix("--")?.strip_prefix(p)?.strip_prefix('-'));
         let key = unprefixed.map(|rest| format!("--{rest}"));
         let key = key.as_deref().unwrap_or(name);
@@ -201,7 +199,7 @@ impl Project {
             return false;
         };
         let namespace = format!("--{namespace}");
-        self.variable(name).is_none() && !self.ds().theme.keys_in_namespaces([namespace.as_str()]).is_empty()
+        self.with_ds(|ds| self.variable(ds, name).is_none() && !ds.theme.keys_in_namespaces([namespace.as_str()]).is_empty())
     }
 
     /// The canonical spelling of `class`, `None` when it already is canonical or unknown.
@@ -210,13 +208,11 @@ impl Project {
             return canonical.clone();
         }
         let options = CanonicalizeOptions { rem: Some(rem), ..CanonicalizeOptions::default() };
-        let mut canonicalizer = self.canonicalizer.borrow_mut();
-        let canonicalizer = canonicalizer.get_or_insert_with(|| {
-            // SAFETY: the compiler is boxed, so the design system stays put until `Project::drop`, which drops this first.
-            let ds: &'static DesignSystem<'static> = unsafe { &*std::ptr::from_ref(self.ds()) };
-            Canonicalizer::new(ds, self.compiler.alloc())
+        let canonical = self.arena.with_dependent(|alloc, state| {
+            let mut canonicalizer = state.canonicalizer.borrow_mut();
+            let canonicalizer = canonicalizer.get_or_insert_with(|| Canonicalizer::new(alloc));
+            canonicalizer.canonicalize(&state.compiler.design_system, &[class], &options).into_iter().next().filter(|c| c != class)
         });
-        let canonical = canonicalizer.canonicalize(&[class], &options).into_iter().next().filter(|c| c != class);
         self.canonical.borrow_mut().insert(class.to_owned(), canonical.clone());
         self.canonical_ready.set(true);
         canonical
@@ -256,7 +252,7 @@ fn distance(a: &str, b: &str, limit: usize) -> Option<usize> {
     row.last().copied().filter(|&d| d <= limit)
 }
 
-fn collect_declarations(nodes: &[Node<'static>], out: &mut Vec<(&'static str, &'static str)>) {
+fn collect_declarations<'a>(nodes: &[Node<'a>], out: &mut Vec<(&'a str, &'a str)>) {
     for node in nodes {
         match node {
             Node::Decl { property, value: Some(value), .. } => out.push((property, value)),

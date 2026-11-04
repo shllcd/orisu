@@ -14,6 +14,7 @@ orisu_compiler.workspace = true
 orisu_parser.workspace = true
 orisu_registry.workspace = true
 orisu_theme.workspace = true
+blake3.workspace = true
 indexmap.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true

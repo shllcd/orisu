@@ -23,6 +23,7 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 - The scanner no longer turns invalid UTF-8 into strings without checking it.
 - The scanner cache is invalidated when the scanner's code changes, not only on a new version, and concurrent writers no longer share a temporary file.
+- Canonicalizing from Node and the language server no longer aliases the compiler it reads.
 - A stylesheet that imports itself fails with `CIRCULAR_IMPORT` instead of hitting the depth limit, and the depth limit message no longer has a stray `)`.
 
 ## [0.3.0] - 2026-10-31
