@@ -11,7 +11,7 @@ use orisu_parser::shadow::replace_shadow_colors;
 const BOX_SHADOW_VALUE: &str =
     "var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)";
 const NULL_SHADOW: &str = "0 0 #0000";
-const RING_OFFSET_SHADOW: &str = "var(--tw-ring-inset,) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color)";
+const RING_OFFSET_SHADOW: &str = "var(--tw-ring-inset, ) 0 0 0 var(--tw-ring-offset-width) var(--tw-ring-offset-color)";
 
 fn outline_properties<'a>(cx: &Cx<'a, '_>) -> Node<'a> {
     cx.at_root([cx.property("--tw-outline-style", Some("solid"), None)])
@@ -552,7 +552,7 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     let ring_color = r.theme.get(&["--default-ring-color"]).unwrap_or("currentcolor");
     let ring_width = r.theme.get(&["--default-ring-width"]).unwrap_or("1px");
     let ring_tail = r.cat(&[" + var(--tw-ring-offset-width)) var(--tw-ring-color, ", ring_color, ")"]);
-    ring(r, "ring", "--tw-ring-color", "--tw-ring-shadow", ring_width, "var(--tw-ring-inset,) 0 0 0 calc(", ring_tail);
+    ring(r, "ring", "--tw-ring-color", "--tw-ring-shadow", ring_width, "var(--tw-ring-inset, ) 0 0 0 calc(", ring_tail);
     ring(
         r,
         "inset-ring",

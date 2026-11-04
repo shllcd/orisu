@@ -460,7 +460,7 @@ pub fn optimize_spliced<'a, 'th: 'a>(
                 "properties",
                 b.vec1(b.at_rule(
                     "@supports",
-                    "((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b))))",
+                    "((-webkit-hyphens: none) and (not (margin-trim: block))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b))))",
                     fallback_ast,
                 )),
             ));

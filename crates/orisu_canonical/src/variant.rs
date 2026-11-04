@@ -89,12 +89,16 @@ fn arbitrary_variants<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>) -> V
         if matches!(v, Variant::Compound { .. }) {
             return v;
         }
-        let signature = cx.variant_signature(&print_variant(v));
+        let printed = print_variant(v);
+        let signature = cx.variant_signature(&printed);
         if !signature.is_valid() {
             return v;
         }
-        match *cx.precomputed_variants().get(&signature).map_or(&[][..], std::vec::Vec::as_slice) {
-            [found] => cx.ds.parse_variant(found).unwrap_or(v),
+        match cx.precomputed_variants().get(&signature).map_or(&[][..], std::vec::Vec::as_slice) {
+            found @ [first, ..] if !found.contains(&printed.as_str()) => {
+                let first = *first;
+                cx.ds.parse_variant(first).unwrap_or(v)
+            }
             _ => v,
         }
     })
@@ -226,7 +230,8 @@ fn modernize_selector<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>, sele
             match pseudo_variant(cx, variant, target_node, &mut compound_not) {
                 None => {
                     let prefix = prefix?;
-                    return Some((Some(prefix), alloc.alloc(Variant::Arbitrary { selector: value, relative: false })));
+                    let selector = if is_pseudo_element(value) { alloc.str(&format!("&{value}")) } else { value };
+                    return Some((Some(prefix), alloc.alloc(Variant::Arbitrary { selector, relative: false })));
                 }
                 Some(name) => parse(cx, &if compound_not { format!("not-{name}") } else { name })?,
             }
@@ -257,6 +262,11 @@ fn modernize_selector<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>, sele
         _ => variant,
     };
     Some((prefix, replacement))
+}
+
+/// Pseudo-elements can't be used inside `&:is(…)`, so moving one into `*` or `**` keeps its `&`.
+fn is_pseudo_element(value: &str) -> bool {
+    value.starts_with("::") || [":before", ":after", ":first-line", ":first-letter"].iter().any(|p| value.eq_ignore_ascii_case(p))
 }
 
 fn parse<'a>(cx: &mut Canon<'a, '_>, input: &str) -> Option<&'a Variant<'a>> {

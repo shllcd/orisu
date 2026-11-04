@@ -90,13 +90,16 @@ struct ValueKey<'a> {
     value: &'a str,
 }
 
+/// The theme variables inlined in each declaration of a utility's signature, see [`Canon::compute_utility_theme_variables`].
+type ThemeVariables = Arc<[Box<str>]>;
+
 #[derive(Default)]
 struct Storage<'a> {
     sentinels: usize,
     utility_signatures: FxHashMap<UtilityKey<'a>, Signature>,
-    variant_signatures: FxHashMap<String, Signature>,
+    variant_signatures: FxHashMap<(Option<u64>, String), Signature>,
     precomputed_utilities: FxHashMap<SigKey, Lookup<'a>>,
-    precomputed_variants: Option<Lookup<'a>>,
+    precomputed_variants: FxHashMap<Option<u64>, Lookup<'a>>,
     static_utilities: FxHashMap<SigKey, StaticUtilities>,
     recorded_statics: FxHashSet<SigKey>,
     utility_properties: FxHashMap<(SigKey, String), Arc<PropertyValues>>,
@@ -104,7 +107,8 @@ struct Storage<'a> {
     property_roots: FxHashMap<SigKey, FxHashMap<String, std::vec::Vec<&'a str>>>,
     property_seen: FxHashMap<SigKey, FxHashSet<String>>,
     spacing: FxHashMap<SpacingKey, Option<f64>>,
-    normalized_values: FxHashMap<ValueKey<'a>, String>,
+    normalized_values: FxHashMap<ValueKey<'a>, (String, Box<str>)>,
+    theme_variables: FxHashMap<(SigKey, String), Option<ThemeVariables>>,
     candidates: FxHashMap<(CanonKey, &'a str), &'a str>,
     variants: FxHashMap<Variant<'a>, &'a [&'a Variant<'a>]>,
     scratch: Allocator,
@@ -321,14 +325,15 @@ impl<'a, 'd> Canon<'a, 'd> {
     }
 
     pub(crate) fn variant_signature(&mut self, variant: &str) -> Signature {
-        if let Some(&signature) = self.storage.variant_signatures.get(variant) {
+        let key = (self.sig.rem.map(f64::to_bits), variant.to_owned());
+        if let Some(&signature) = self.storage.variant_signatures.get(&key) {
             return signature;
         }
         let signature = match self.compute_variant_signature(variant) {
             Some(signature) => signature,
             None => self.sentinel(),
         };
-        self.storage.variant_signatures.insert(variant.to_owned(), signature);
+        self.storage.variant_signatures.insert(key, signature);
         signature
     }
 
@@ -465,21 +470,33 @@ impl<'a, 'd> Canon<'a, 'd> {
         }
     }
 
+    /// Static variants and functional variants with known values (`max-lg`, `@md`) by signature, in registration order.
     pub(crate) fn precomputed_variants(&mut self) -> &Lookup<'a> {
-        if self.storage.precomputed_variants.is_none() {
+        let rem = self.sig.rem.map(f64::to_bits);
+        if !self.storage.precomputed_variants.contains_key(&rem) {
             let mut lookup = Lookup::default();
-            for (root, entry) in self.ds.ds.variants.entries() {
-                if entry.kind != VariantKind::Static {
-                    continue;
-                }
-                let signature = self.variant_signature(root);
-                if signature.is_valid() {
-                    lookup.entry(signature).or_default().push(root);
+            let ds = self.ds.ds;
+            for (root, entry) in ds.variants.entries() {
+                let names = match entry.kind {
+                    VariantKind::Static => vec![root],
+                    VariantKind::Functional => ds
+                        .variants
+                        .completions(root, &ds.theme)
+                        .into_iter()
+                        .map(|value| self.ds.alloc.str(&if root == "@" { format!("@{value}") } else { format!("{root}-{value}") }))
+                        .collect(),
+                    _ => continue,
+                };
+                for name in names {
+                    let signature = self.variant_signature(name);
+                    if signature.is_valid() {
+                        lookup.entry(signature).or_default().push(name);
+                    }
                 }
             }
-            self.storage.precomputed_variants = Some(lookup);
+            self.storage.precomputed_variants.insert(rem, lookup);
         }
-        self.storage.precomputed_variants.get_or_insert_default()
+        &self.storage.precomputed_variants[&rem]
     }
 
     /// Records the precomputed utilities in the static utility lookup, which only collapsing reads.
@@ -521,6 +538,16 @@ impl<'a, 'd> Canon<'a, 'd> {
             }
         }
         unrecorded
+    }
+
+    fn utility_theme_variables(&mut self, utility: &str) -> Option<ThemeVariables> {
+        let key = (self.sig_key(), utility.to_owned());
+        if let Some(variables) = self.storage.theme_variables.get(&key) {
+            return variables.clone();
+        }
+        let variables: Option<ThemeVariables> = self.compute_utility_theme_variables(utility).map(Arc::from);
+        self.storage.theme_variables.insert(key, variables.clone());
+        variables
     }
 
     /// The declarations `class` produces, also recorded in the static utility lookup.
@@ -733,7 +760,7 @@ impl<'a, 'd> Canon<'a, 'd> {
 
         let sig_key = self.sig_key();
         let mut dynamic: FxHashMap<usize, Map<String, Map<String, Set<String>>>> = FxHashMap::default();
-        let other_utilities: std::vec::Vec<Set<String>> = properties
+        let mut other_utilities: std::vec::Vec<Set<String>> = properties
             .iter()
             .enumerate()
             .map(|(idx, property_values)| {
@@ -763,6 +790,31 @@ impl<'a, 'd> Canon<'a, 'd> {
             })
             .collect();
 
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        let mut covered: FxHashMap<&str, FxHashSet<&str>> = FxHashMap::default();
+        for replacements in &other_utilities {
+            for replacement in replacements {
+                if !seen.insert(replacement) {
+                    covered.entry(replacement).or_default();
+                }
+            }
+        }
+        for (idx, replacements) in other_utilities.iter().enumerate() {
+            for replacement in replacements {
+                if let Some(covered) = covered.get_mut(replacement.as_str()) {
+                    covered.extend(properties[idx].keys().map(String::as_str));
+                }
+            }
+        }
+        let mut possible: FxHashMap<String, bool> = FxHashMap::default();
+        for (replacement, covered) in &covered {
+            let properties = self.utility_properties(replacement);
+            possible.insert((*replacement).to_owned(), properties.keys().all(|property| covered.contains(property.as_str())));
+        }
+        for replacements in &mut other_utilities {
+            replacements.retain(|replacement| possible.get(replacement).copied().unwrap_or(false));
+        }
+
         let mut linked: Map<usize, Set<usize>> = Map::default();
         for i in 0..other_utilities.len() {
             for j in i + 1..other_utilities.len() {
@@ -782,6 +834,17 @@ impl<'a, 'd> Canon<'a, 'd> {
             unique.insert(sorted);
         }
 
+        let prefixed: std::vec::Vec<String> = linked
+            .keys()
+            .map(|&idx| match self.prefix() {
+                Some(prefix) if !candidates[idx].starts_with(prefix) => format!("{prefix}:{}", candidates[idx]),
+                _ => candidates[idx].clone(),
+            })
+            .collect();
+        let classes: std::vec::Vec<&str> = prefixed.iter().map(String::as_str).collect();
+        let order: FxHashMap<usize, u64> =
+            linked.keys().zip(self.ds.class_order(&classes)).filter_map(|(&idx, (_, position))| Some((idx, position?))).collect();
+
         let mut result: Set<String> = candidates.iter().cloned().collect();
         let mut drop: Set<&str> = Set::default();
         for idxs in &unique {
@@ -797,14 +860,27 @@ impl<'a, 'd> Canon<'a, 'd> {
                 }
                 let mut names: std::vec::Vec<&str> = combo.iter().map(|&idx| candidates[idx].as_str()).collect();
                 names.sort_by(|a, b| locale_compare(a, b));
-                let collapsed = self.utility_signature(&names.join(" "));
-                for replacement in &potential {
-                    if self.utility_signature(replacement) != collapsed {
+                let names = names.join(" ");
+                let collapsed = self.utility_signature(&names);
+                let mut ordered = combo.clone();
+                ordered.sort_by(|a, z| match (order.get(z), order.get(a)) {
+                    (a, z) if a == z => std::cmp::Ordering::Equal,
+                    (None, _) => std::cmp::Ordering::Greater,
+                    (_, None) => std::cmp::Ordering::Less,
+                    (a, z) => a.cmp(&z),
+                });
+                let mut replacements: Set<&str> = ordered.iter().map(|&idx| candidates[idx].as_str()).collect();
+                replacements.extend(potential.iter().map(String::as_str));
+                let collapsed_variables = self.utility_theme_variables(&names);
+                for replacement in replacements {
+                    if self.utility_signature(replacement) != collapsed
+                        || !uses_same_theme_variables(collapsed_variables.as_deref(), self.utility_theme_variables(replacement).as_deref())
+                    {
                         continue;
                     }
-                    result.insert(replacement.clone());
+                    result.insert(replacement.to_owned());
                     for &item in &combo {
-                        if candidates[item] != *replacement {
+                        if candidates[item] != replacement {
                             drop.insert(&candidates[item]);
                         }
                     }
@@ -829,6 +905,16 @@ fn collect_declarations<'a>(nodes: &[Node<'a>], out: &mut std::vec::Vec<(&'a str
             _ => {}
         }
     }
+}
+
+/// Whether `replacement` inlines the same theme variables as `candidates` in each declaration of their equal signatures.
+/// A declaration without theme variables can be replaced by one with them, as `[width:16px] [height:16px]` becomes `size-4`.
+fn uses_same_theme_variables(candidates: Option<&[Box<str>]>, replacement: Option<&[Box<str>]>) -> bool {
+    let (Some(candidates), Some(replacement)) = (candidates, replacement) else {
+        return false;
+    };
+    candidates.len() == replacement.len()
+        && candidates.iter().zip(replacement).all(|(variables, replacement)| variables.is_empty() || variables == replacement)
 }
 
 /// `Set.prototype.intersection`: iterates the smaller set, keeping its order.

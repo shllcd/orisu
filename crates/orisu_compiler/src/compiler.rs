@@ -21,7 +21,7 @@ use orisu_registry::variants::{Compounds, body_compounds, register_custom_body, 
 use orisu_theme::{Theme, UsedVars, opts};
 use rustc_hash::FxBuildHasher;
 
-pub const VERSION: &str = "4.3.3";
+pub const VERSION: &str = "4.3.4";
 
 pub mod features {
     pub const NONE: u8 = 0;

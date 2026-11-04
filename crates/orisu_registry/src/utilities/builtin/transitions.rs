@@ -6,10 +6,10 @@ use orisu_parser::infer::is_positive_integer;
 
 const DEFAULT_TRANSITION_PROPERTY: &str = "color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events";
 
-const CONTAIN_VALUE: &str = "var(--tw-contain-size,) var(--tw-contain-layout,) var(--tw-contain-paint,) var(--tw-contain-style,)";
+const CONTAIN_VALUE: &str = "var(--tw-contain-size, ) var(--tw-contain-layout, ) var(--tw-contain-paint, ) var(--tw-contain-style, )";
 
 const FONT_VARIANT_NUMERIC_VALUE: &str =
-    "var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,)";
+    "var(--tw-ordinal, ) var(--tw-slashed-zero, ) var(--tw-numeric-figure, ) var(--tw-numeric-spacing, ) var(--tw-numeric-fraction, )";
 
 fn ease_property<'a>(cx: &Cx<'a, '_>) -> Node<'a> {
     cx.at_root([cx.property("--tw-ease", None, None)])

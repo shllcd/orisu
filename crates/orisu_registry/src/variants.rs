@@ -859,9 +859,9 @@ fn group_like<'a>(v: &mut Variants<'a>, name: &'a str, class: &'a str, combinato
         rewrite_variant(node, |selector| {
             let selector = selector.replace('&', variant_selector);
             if segment(&selector, b',').len() > 1 {
-                return cx.cat(&["&:is(:is(", &selector, ")", combinator, ")"]);
+                return cx.cat(&[":is(:is(", &selector, ")", combinator, "&)"]);
             }
-            cx.cat(&["&:is(", &selector, combinator, ")"])
+            cx.cat(&[":is(", &selector, combinator, "&)"])
         })
     });
     v.suggest(name, VariantValues::Compounds);
@@ -891,8 +891,8 @@ pub fn register_builtin<'a>(v: &mut Variants<'a>, theme: &Theme<'a>, alloc: &'a 
     });
     v.suggest("not", VariantValues::Compounds);
 
-    group_like(v, "group", "group", " *");
-    group_like(v, "peer", "peer", " ~ *");
+    group_like(v, "group", "group", " ");
+    group_like(v, "peer", "peer", " ~ ");
 
     static_variant(v, alloc, "first-letter", &["&::first-letter"]);
     static_variant(v, alloc, "first-line", &["&::first-line"]);

@@ -9,6 +9,10 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+### Changed
+
+- Output and canonicalization follow Tailwind 4.3.4.
+
 ## [0.3.0] - 2026-10-31
 
 ### Changed

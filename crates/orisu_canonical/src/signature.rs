@@ -1,7 +1,7 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use super::fold::{canonicalize_calc_expressions, constant_fold, expand_declaration, locale_compare};
+use super::fold::{canonicalize_calc_expressions, constant_fold, constant_fold_declaration, expand_declaration, locale_compare};
 use super::{Canon, Signature, ValueKey, collect_declarations, features, hash_signature};
 use orisu_allocator::{AllocExt, Allocator, Vec};
 use orisu_ast::{Node, Nodes, clone_in, to_css, walk_mut};
@@ -11,7 +11,7 @@ use orisu_compiler::compiler::replace_applies;
 use orisu_compiler::css_functions::{has_theme_function, substitute_functions_in_value};
 use orisu_parser::selector::{self as sp, SNode};
 use orisu_parser::value::{self as vp, ValueNode};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 
 impl<'a> Canon<'a, '_> {
@@ -132,11 +132,15 @@ impl<'a> Canon<'a, '_> {
             Some(prefix) if !variant.starts_with(prefix) => format!("{prefix}:{variant}"),
             _ => variant.to_owned(),
         };
+        let rem = self.sig.rem;
         self.with_scratch(|cx, alloc| {
             let mut ast = cx.apply_ast(&format!("{variant}:flex"), alloc)?;
             walk_mut(&mut ast, &mut |node| {
                 match node {
-                    Node::AtRule { params, .. } if params.contains(' ') => *params = alloc.str(&params.replace(' ', "")),
+                    Node::AtRule { params, .. } => {
+                        let folded = constant_fold_declaration(params, rem, alloc);
+                        *params = alloc.str(&folded.replace(' ', ""));
+                    }
                     Node::Rule { selector, .. } => {
                         let mut selector_ast = sp::parse(selector, alloc);
                         let mut changed = false;
@@ -157,6 +161,35 @@ impl<'a> Canon<'a, '_> {
     where
         'a: 's,
     {
+        self.canonicalize_ast_tracking(nodes, alloc, &mut None);
+    }
+
+    /// For each declaration of the signature of `utility`, the theme variables inlined in its value, sorted and joined by spaces.
+    pub(super) fn compute_utility_theme_variables(&mut self, utility: &str) -> Option<std::vec::Vec<Box<str>>> {
+        let utility = match self.prefix() {
+            Some(prefix) if !utility.starts_with(prefix) => format!("{prefix}:{utility}"),
+            _ => utility.to_owned(),
+        };
+        self.with_scratch(|cx, alloc| {
+            let mut ast = cx.without_inline(|cx| cx.apply_ast(&utility, alloc))?;
+            let mut inlined = Some(FxHashMap::default());
+            cx.canonicalize_ast_tracking(&mut ast, alloc, &mut inlined);
+            let inlined = inlined.unwrap_or_default();
+            let mut declarations = std::vec::Vec::new();
+            collect_declarations(&ast, &mut declarations);
+            Some(declarations.iter().map(|(_, value)| inlined.get(&value.as_ptr().addr()).cloned().unwrap_or_default()).collect())
+        })
+    }
+
+    /// Like [`Self::canonicalize_ast`], recording the inlined theme variables by the address of each declaration value it writes.
+    fn canonicalize_ast_tracking<'s>(
+        &mut self,
+        nodes: &mut Nodes<'s>,
+        alloc: &'s Allocator,
+        inlined: &mut Option<FxHashMap<usize, Box<str>>>,
+    ) where
+        'a: 's,
+    {
         let mut i = 0;
         while i < nodes.len() {
             match &mut nodes[i] {
@@ -175,10 +208,10 @@ impl<'a> Canon<'a, '_> {
                 }
                 Node::Decl { property, value: Some(value), important } => {
                     let (property, value, important) = (*property, *value, *important);
-                    if property.starts_with("--tw-")
+                    if let Some(name) = property.strip_prefix("--tw-")
                         && nodes.iter().any(|sibling| {
                             matches!(sibling, Node::Decl { property: p, value: Some(v), important: imp }
-                                if *v == value && *imp == important && !p.starts_with("--tw-"))
+                                if *v == value && *imp == important && *p == tw_variable_property(property, name))
                         })
                     {
                         nodes.remove(i);
@@ -194,14 +227,20 @@ impl<'a> Canon<'a, '_> {
                         nodes.splice(i..=i, replacement);
                         continue;
                     }
-                    let mut normalized = self.normalize_value(value, alloc);
+                    let (mut normalized, variables) = self.normalize_value(value, alloc);
                     if !property.starts_with("--") {
                         normalized = lowercase_hex(&normalized);
                     }
-                    nodes[i] = Node::Decl { property, value: Some(alloc.str(&normalized)), important };
+                    let value = alloc.str(&normalized);
+                    if let Some(inlined) = inlined
+                        && !variables.is_empty()
+                    {
+                        inlined.insert(value.as_ptr().addr(), variables);
+                    }
+                    nodes[i] = Node::Decl { property, value: Some(value), important };
                 }
                 Node::Rule { nodes: children, .. } | Node::AtRule { nodes: children, .. } => {
-                    self.canonicalize_ast(children, alloc);
+                    self.canonicalize_ast_tracking(children, alloc, inlined);
                     dedupe_and_sort(children);
                 }
             }
@@ -209,7 +248,8 @@ impl<'a> Canon<'a, '_> {
         }
     }
 
-    fn normalize_value(&mut self, value: &str, alloc: &Allocator) -> String {
+    /// The normalized value and the theme variables inlined into it.
+    fn normalize_value(&mut self, value: &str, alloc: &Allocator) -> (String, Box<str>) {
         let sig = self.sig_key();
         let inline = self.ds.options & orisu_theme::opts::IGNORE_INLINE != 0;
         if let Some(normalized) = self.storage.normalized_values.get(&ValueKey { sig, inline, value }) {
@@ -221,22 +261,25 @@ impl<'a> Canon<'a, '_> {
         normalized
     }
 
-    fn compute_normalized_value(&self, value: &str, alloc: &Allocator) -> String {
-        let mut value = if value.contains("var(") { self.resolve_variables_in_value(value, alloc) } else { value.to_owned() };
+    fn compute_normalized_value(&self, value: &str, alloc: &Allocator) -> (String, Box<str>) {
+        let mut inlined = std::vec::Vec::new();
+        let mut value = if value.contains("var(") { self.resolve_variables_in_value(value, alloc, &mut inlined) } else { value.to_owned() };
         let mut ast = vp::parse(&value, alloc);
         let folded = constant_fold(&mut ast, self.sig.rem, true, alloc);
         let normalized = canonicalize_calc_expressions(&mut ast);
         if folded || normalized {
             value = vp::to_string(&ast);
         }
-        print_arbitrary_value(&value, alloc)
+        inlined.sort_unstable();
+        inlined.dedup();
+        (print_arbitrary_value(&value, alloc), inlined.join(" ").into())
     }
 
-    fn resolve_variables_in_value(&self, value: &str, alloc: &Allocator) -> String {
+    fn resolve_variables_in_value(&self, value: &str, alloc: &Allocator, inlined: &mut std::vec::Vec<String>) -> String {
         let mut ast = vp::parse(value, alloc);
         let mut seen = FxHashSet::default();
         let mut changed = false;
-        self.resolve_variables(&mut ast, &mut seen, &mut changed, alloc);
+        self.resolve_variables(&mut ast, &mut seen, &mut changed, inlined, alloc);
         if changed { vp::to_string(&ast) } else { value.to_owned() }
     }
 
@@ -245,6 +288,7 @@ impl<'a> Canon<'a, '_> {
         nodes: &mut Vec<'s, ValueNode<'s>>,
         seen: &mut FxHashSet<String>,
         changed: &mut bool,
+        inlined: &mut std::vec::Vec<String>,
         alloc: &'s Allocator,
     ) where
         'a: 's,
@@ -260,8 +304,10 @@ impl<'a> Canon<'a, '_> {
                     None => Cow::Borrowed(raw),
                 };
                 let resolved = self.ds.resolve_theme_value(&variable, true);
-                if seen.insert(variable.into_owned())
+                let variable = variable.into_owned();
+                if seen.insert(variable.clone())
                     && let Some(resolved) = resolved
+                    && !is_css_wide_keyword(resolved)
                 {
                     if children.len() == 1 {
                         *changed = true;
@@ -269,6 +315,7 @@ impl<'a> Canon<'a, '_> {
                     }
                     if children.len() >= 3 && vp::to_string(children) == format!("{raw},{resolved}") {
                         *changed = true;
+                        inlined.push(variable);
                         let replacement = vp::parse(resolved, alloc);
                         nodes.splice(i..=i, replacement);
                         continue;
@@ -276,11 +323,27 @@ impl<'a> Canon<'a, '_> {
                 }
             }
             if let ValueNode::Function(_, children) = &mut nodes[i] {
-                self.resolve_variables(children, seen, changed, alloc);
+                self.resolve_variables(children, seen, changed, inlined, alloc);
             }
             i += 1;
         }
     }
+}
+
+/// The property a core utility sets next to `--tw-<name>`, which is `<name>` unless the names differ.
+fn tw_variable_property<'p>(property: &str, name: &'p str) -> &'p str {
+    match property {
+        "--tw-duration" => "transition-duration",
+        "--tw-ease" => "transition-timing-function",
+        "--tw-leading" => "line-height",
+        "--tw-tracking" => "letter-spacing",
+        _ => name,
+    }
+}
+
+/// Theme values like `unset` are runtime placeholders, so variables sharing one are not interchangeable and are never inlined.
+fn is_css_wide_keyword(value: &str) -> bool {
+    ["initial", "inherit", "revert", "revert-layer", "revert-rule", "unset"].iter().any(|k| value.eq_ignore_ascii_case(k))
 }
 
 fn property_names(nodes: &[Node<'_>]) -> std::vec::Vec<String> {

@@ -144,11 +144,9 @@ impl<'a> Canon<'a, '_> {
                 let part = parts[1];
                 let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
                 modifier = Some(if part.strip_suffix('%').is_some_and(digits) {
-                    Modifier::Named(alloc.str(&part[..part.len() - 1]))
+                    self.opacity_modifier(js_number(&part[..part.len() - 1]))
                 } else if part.strip_prefix('0').unwrap_or(part).strip_prefix('.').is_some_and(digits) {
-                    let value = js_number(part) * 100.0;
-                    let printed = alloc.str(&format_js_number(value));
-                    if value.fract() == 0.0 { Modifier::Named(printed) } else { Modifier::Arbitrary(printed) }
+                    self.opacity_modifier(to_percentage(js_number(part)))
                 } else {
                     Modifier::Arbitrary(alloc.str(part))
                 });
@@ -157,6 +155,24 @@ impl<'a> Canon<'a, '_> {
             self.to_var(path, fallback).or_else(|| self.to_theme(path, fallback))
         });
         (result, modifier)
+    }
+
+    /// A named modifier only when `--opacity-*` doesn't turn it into a different opacity, e.g. `--opacity-50: 10%`.
+    fn opacity_modifier(&self, percentage: f64) -> Modifier<'a> {
+        let printed = format_js_number(percentage);
+        if percentage.is_finite() && percentage.fract() == 0.0 {
+            let named = match self.ds.theme.resolve_value(Some(&printed), &["--opacity"]) {
+                None => true,
+                Some(opacity) => match opacity.strip_suffix('%') {
+                    Some(number) => js_number(number) == percentage,
+                    None => to_percentage(js_number(opacity)) == percentage,
+                },
+            };
+            if named {
+                return Modifier::Named(self.ds.alloc.str(&printed));
+            }
+        }
+        Modifier::Arbitrary(self.ds.alloc.str(&format!("{printed}%")))
     }
 
     fn path_to_variable_name(&self, path: &str, should_prefix: bool) -> Option<String> {
@@ -241,6 +257,36 @@ impl<'a> Canon<'a, '_> {
             i += 1;
         }
     }
+}
+
+/// JavaScript `Number((value * 100).toFixed(10))`, which drops floating point noise like `.29 * 100` being `28.999999999999996`.
+fn to_percentage(value: f64) -> f64 {
+    let n = value * 100.0;
+    if !n.is_finite() || n.abs() >= 1e21 {
+        return n;
+    }
+    let exact = format!("{:.1100}", n.abs());
+    let (int, frac) = exact.split_once('.').unwrap_or((&exact, ""));
+    let mut digits: std::vec::Vec<u8> = int.bytes().chain(frac.bytes().take(10)).collect();
+    if frac.as_bytes()[10] >= b'5' {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+    }
+    let (int, frac) = digits.split_at(digits.len() - 10);
+    let rounded: f64 = format!("{}.{}", String::from_utf8_lossy(int), String::from_utf8_lossy(frac)).parse().unwrap_or(n);
+    if n < 0.0 { -rounded } else { rounded }
 }
 
 fn count_theme_usages(nodes: &[ValueNode<'_>], usages: &mut usize, modifiers: &mut usize) {

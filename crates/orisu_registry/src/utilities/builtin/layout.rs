@@ -48,7 +48,7 @@ fn border_spacing_properties<'a>(cx: &Cx<'a, '_>) -> Node<'a> {
     ])
 }
 
-const TRANSFORM_VALUE: &str = "var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,)";
+const TRANSFORM_VALUE: &str = "var(--tw-rotate-x, ) var(--tw-rotate-y, ) var(--tw-rotate-z, ) var(--tw-skew-x, ) var(--tw-skew-y, )";
 
 fn is_zero_spacing(value: &str) -> bool {
     if value == "--spacing(0)" || value == "--spacing(-0)" {
@@ -766,7 +766,7 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     for value in ["auto", "none", "manipulation"] {
         r.static_decls(&format!("touch-{value}"), &[("touch-action", value)]);
     }
-    const TOUCH: &str = "var(--tw-pan-x,) var(--tw-pan-y,) var(--tw-pinch-zoom,)";
+    const TOUCH: &str = "var(--tw-pan-x, ) var(--tw-pan-y, ) var(--tw-pinch-zoom, )";
     for (property, values) in [("--tw-pan-x", ["x", "left", "right"]), ("--tw-pan-y", ["y", "up", "down"])] {
         for value in values {
             let pan = r.cat(&["pan-", value]);
