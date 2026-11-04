@@ -16,7 +16,7 @@ files and directories according to ignore globs found in files like
 
 
 ```rust,no_run
-use ignore::Walk;
+use orisu_ignore::Walk;
 
 for result in Walk::new("./") {
     // Each item yielded by the iterator is either a directory entry or an
@@ -34,7 +34,7 @@ By default, the recursive directory iterator will ignore hidden files and
 directories. This can be disabled by building the iterator with `WalkBuilder`:
 
 ```rust,no_run
-use ignore::WalkBuilder;
+use orisu_ignore::WalkBuilder;
 
 for result in WalkBuilder::new("./").hidden(false).build() {
     println!("{:?}", result);

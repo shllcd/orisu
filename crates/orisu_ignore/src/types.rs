@@ -15,7 +15,7 @@ This shows how to create and use a simple file type matcher using the default
 file types defined in this crate.
 
 ```
-use ignore::types::TypesBuilder;
+use orisu_ignore::types::TypesBuilder;
 
 let mut builder = TypesBuilder::new();
 builder.add_defaults();
@@ -33,7 +33,7 @@ That is, this will let us match file paths that *don't* correspond to a
 particular file type.
 
 ```
-use ignore::types::TypesBuilder;
+use orisu_ignore::types::TypesBuilder;
 
 let mut builder = TypesBuilder::new();
 builder.add_defaults();
@@ -50,7 +50,7 @@ This shows how to extend this library default file type definitions with
 your own.
 
 ```
-use ignore::types::TypesBuilder;
+use orisu_ignore::types::TypesBuilder;
 
 let mut builder = TypesBuilder::new();
 builder.add_defaults();
@@ -70,7 +70,7 @@ assert!(matcher.matched("x.bar", false).is_ignore());
 We can also add file type definitions based on other definitions.
 
 ```
-use ignore::types::TypesBuilder;
+use orisu_ignore::types::TypesBuilder;
 
 let mut builder = TypesBuilder::new();
 builder.add_defaults();
