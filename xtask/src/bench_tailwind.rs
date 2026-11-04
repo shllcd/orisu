@@ -13,15 +13,15 @@ const SHADCN_REV: &str = "e31626978fe8e3804fe2e792e11e32dc560e40a8";
 const DEPENDENCIES: &str = r#"{
   "private": true,
   "dependencies": {
-    "@tailwindcss/node": "4.3.3",
-    "@tailwindcss/oxide": "4.3.3",
+    "@tailwindcss/node": "4.3.4",
+    "@tailwindcss/oxide": "4.3.4",
     "clsx": "2.1.1",
     "cn": "0.2.6",
     "esbuild": "0.28.2",
     "shadcn": "4.22.1",
     "streamdown": "2.7.0",
     "tailwind-merge": "3.7.0",
-    "tailwindcss": "4.3.3",
+    "tailwindcss": "4.3.4",
     "tw-animate-css": "1.4.0"
   }
 }
@@ -53,7 +53,7 @@ struct Sample {
     heap: i64,
 }
 
-/// Compares orisu with Tailwind 4.3.3 on a real project, shadcn/ui docs at a pinned commit by default. Requires both to produce
+/// Compares orisu with Tailwind 4.3.4 on a real project, shadcn/ui docs at a pinned commit by default. Requires both to produce
 /// the same candidates and CSS, then prints instructions per iteration as `min(setup + K iterations) - min(setup)` over `--runs`.
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut entry = None;

@@ -1,7 +1,7 @@
 # orisu
 
 A Tailwind CSS 4 engine written in Rust. The goal is a drop-in replacement: the same CSS byte for byte as
-Tailwind 4.3.3, with less work on every step that matters while you are developing: compile, build, HMR,
+Tailwind 4.3.4, with less work on every step that matters while you are developing: compile, build, HMR,
 class canonicalization and `cn`.
 
 ```sh
@@ -38,11 +38,11 @@ same table as a module to import once.
 
 On the shadcn/ui docs, with byte-identical CSS:
 
-| Scenario           | Tailwind 4.3.3 |   orisu |
+| Scenario           | Tailwind 4.3.4 |   orisu |
 | ------------------ | -------------: | ------: |
-| build              |        62.3 ms | 12.2 ms |
-| HMR                |        14.0 ms |  1.1 ms |
-| canonicalize, cold |      1475.2 ms | 29.2 ms |
+| build              |        66.9 ms | 12.7 ms |
+| HMR                |        17.9 ms |  1.1 ms |
+| canonicalize, cold |      1145.1 ms | 27.7 ms |
 | `cn` per call      |        1.48 µs | 0.26 µs |
 
 The full numbers (instructions, memory, `cn` against shadcn's `cn`, bundle size) are in [BENCHMARKS.md](BENCHMARKS.md).
