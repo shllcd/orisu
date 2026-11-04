@@ -193,6 +193,9 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
             let Some(value) = value else {
                 let value = cx.theme.get(&["--drop-shadow"])?;
                 let resolved = cx.resolve(None, &["--drop-shadow"])?;
+                if modifier.is_some() && alpha.is_none() {
+                    return None;
+                }
                 return sized(value, drop_shadows(resolved));
             };
             let value = match value {

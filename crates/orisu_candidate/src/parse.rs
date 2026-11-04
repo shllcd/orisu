@@ -172,7 +172,7 @@ pub fn parse_candidate<'a, R: Registry<'a> + ?Sized>(input: &'a str, registry: &
     }
 
     let parts = segment(base, b'/');
-    if parts.len() > 2 && !parts[2].is_empty() {
+    if parts.len() > 2 {
         return out;
     }
     let mut base_without_modifier = parts[0];
@@ -199,10 +199,9 @@ pub fn parse_candidate<'a, R: Registry<'a> + ?Sized>(input: &'a str, registry: &
             _ => return out,
         };
         let property = &base_without_modifier[..idx];
-        let value = decode_arbitrary_value(&base_without_modifier[idx + 1..], alloc);
-        if !is_valid_arbitrary(value) {
+        let Some(value) = decode_valid_arbitrary_value(&base_without_modifier[idx + 1..], alloc) else {
             return out;
-        }
+        };
         out.push(candidate(CandidateKind::Arbitrary { property, value, modifier }));
         return out;
     }
@@ -216,10 +215,9 @@ pub fn parse_candidate<'a, R: Registry<'a> + ?Sized>(input: &'a str, registry: &
             if last(value) != Some(b']') {
                 return false;
             }
-            let mut arbitrary = decode_arbitrary_value(&value[start + 1..value.len() - 1], alloc);
-            if !is_valid_arbitrary(arbitrary) {
+            let Some(mut arbitrary) = decode_valid_arbitrary_value(&value[start + 1..value.len() - 1], alloc) else {
                 return true;
-            }
+            };
             let mut typehint = None;
             for (i, b) in arbitrary.bytes().enumerate() {
                 if b == b':' {
@@ -298,10 +296,15 @@ pub fn parse_candidate<'a, R: Registry<'a> + ?Sized>(input: &'a str, registry: &
     out
 }
 
+/// Validates before decoding, which would turn the unbalanced `calc(1px` into the balanced `calc()1px`.
+fn decode_valid_arbitrary_value<'a>(raw: &'a str, alloc: &'a Allocator) -> Option<&'a str> {
+    is_valid_arbitrary(raw).then(|| decode_arbitrary_value(raw, alloc))
+}
+
 pub fn parse_modifier<'a>(modifier: &'a str, alloc: &'a Allocator) -> Option<Modifier<'a>> {
     if first(modifier) == Some(b'[') && last(modifier) == Some(b']') {
-        let value = decode_arbitrary_value(&modifier[1..modifier.len() - 1], alloc);
-        if !is_valid_arbitrary(value) || is_blank(value) {
+        let value = decode_valid_arbitrary_value(&modifier[1..modifier.len() - 1], alloc)?;
+        if is_blank(value) {
             return None;
         }
         return Some(Modifier::Arbitrary(value));
@@ -322,8 +325,8 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
         if variant.as_bytes().get(1) == Some(&b'@') && variant.contains('&') {
             return None;
         }
-        let mut selector = decode_arbitrary_value(&variant[1..variant.len() - 1], alloc);
-        if !is_valid_arbitrary(selector) || is_blank(selector) {
+        let mut selector = decode_valid_arbitrary_value(&variant[1..variant.len() - 1], alloc)?;
+        if is_blank(selector) {
             return None;
         }
         let relative = matches!(first(selector), Some(b'>' | b'+' | b'~'));
@@ -334,7 +337,7 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
     }
 
     let parts = segment(variant, b'/');
-    if parts.len() > 2 && !parts[2].is_empty() {
+    if parts.len() > 2 {
         return None;
     }
     let without_modifier = parts[0];
@@ -361,8 +364,8 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
                         if first(value) != Some(b'[') {
                             continue;
                         }
-                        let arbitrary = decode_arbitrary_value(&value[1..value.len() - 1], alloc);
-                        if !is_valid_arbitrary(arbitrary) || is_blank(arbitrary) {
+                        let arbitrary = decode_valid_arbitrary_value(&value[1..value.len() - 1], alloc)?;
+                        if is_blank(arbitrary) {
                             return None;
                         }
                         return Some(Variant::Functional {
@@ -375,8 +378,8 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
                         if first(value) != Some(b'(') {
                             continue;
                         }
-                        let arbitrary = decode_arbitrary_value(&value[1..value.len() - 1], alloc);
-                        if !is_valid_arbitrary(arbitrary) || is_blank(arbitrary) || !starts_with_dashes(arbitrary) {
+                        let arbitrary = decode_valid_arbitrary_value(&value[1..value.len() - 1], alloc)?;
+                        if is_blank(arbitrary) || !starts_with_dashes(arbitrary) {
                             return None;
                         }
                         return Some(Variant::Functional {

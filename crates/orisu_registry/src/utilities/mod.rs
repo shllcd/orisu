@@ -584,6 +584,9 @@ impl<'a> Functional<'a> {
             Some(UtilityValue::Named { value, fraction }) => {
                 let named = Named { value, fraction };
                 let mut resolved = cx.resolve(Some(fraction.unwrap_or(value)), self.theme_keys);
+                if resolved.is_some() && modifier.is_some() && fraction.is_none() {
+                    return None;
+                }
                 if resolved.is_none()
                     && self.supports_fractions
                     && let Some(fraction) = fraction

@@ -94,6 +94,9 @@ fn shadow<'a>(r: &mut Registrar<'a, '_>, s: Shadow) {
             };
             let alpha = shadow_alpha(cx, modifier);
             let shadows = |value: &'a str, prefix: &str| {
+                if modifier.is_some() && alpha.is_none() {
+                    return None;
+                }
                 let mut nodes = Vec::with_capacity_in(5, cx.alloc);
                 nodes.push((s.properties)(cx));
                 nodes.push(cx.decl_opt(s.alpha_var, alpha));

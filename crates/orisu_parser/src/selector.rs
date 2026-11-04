@@ -71,6 +71,11 @@ impl<'a> SNode<'a> {
     }
 }
 
+/// Includes the CSS 1 and 2 pseudo-elements browsers still accept with a single colon.
+pub fn is_pseudo_element(value: &str) -> bool {
+    value.starts_with("::") || [":before", ":after", ":first-line", ":first-letter"].iter().any(|p| value.eq_ignore_ascii_case(p))
+}
+
 pub fn to_css<'a>(ast: &[SNode<'_>], alloc: &'a Allocator) -> &'a str {
     let mut out = ArenaString::new_in(alloc);
     write_css(ast, &mut out, false);
@@ -249,7 +254,7 @@ pub fn parse_in<'a>(input: &'a str, alloc: &'a Allocator) -> Vec<'a, SNode<'a>> 
             }
             b'(' => {
                 let name = buf.take().map_or("", |s| &input[s..i]);
-                if !matches!(name, ":not" | ":where" | ":has" | ":is") {
+                if !matches!(name, ":not" | ":where" | ":has" | ":is" | ":-moz-any" | ":-webkit-any") {
                     let start = i + 1;
                     let mut nesting = 0;
                     let mut j = i + 1;

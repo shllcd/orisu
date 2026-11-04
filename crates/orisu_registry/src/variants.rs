@@ -6,7 +6,7 @@ use indexmap::IndexMap;
 use orisu_allocator::{AllocExt, Allocator, ArenaString, Vec};
 use orisu_ast::bytes::trim;
 use orisu_ast::parse_at_rule;
-use orisu_ast::{Builder, Node, Nodes, Scope, Walk, clone_in, walk, walk_mut, walk_scoped};
+use orisu_ast::{Builder, Ctx, Node, Nodes, Scope, Source, Walk, clone_in, walk, walk_mut, walk_scoped};
 use orisu_candidate::Registry;
 use orisu_candidate::{Variant, VariantKind, VariantValue};
 use orisu_parser::attribute_selector::is_valid_attribute_selector;
@@ -76,8 +76,8 @@ pub enum VariantValues<'a> {
 pub enum Apply<'a> {
     /// Wraps the body in each selector or at-rule, cloning it for all but the last.
     Wrap(&'a [Wrapper<'a>]),
-    /// A `@custom-variant` body with `@slot` standing for the wrapped nodes.
-    Body(&'a [Node<'a>]),
+    /// A `@custom-variant` body with `@slot` standing for the wrapped nodes, and whether it uses `@scope`.
+    Body(&'a [Node<'a>], bool),
     Fn(ApplyFn<'a>),
 }
 
@@ -85,17 +85,24 @@ impl<'a> Apply<'a> {
     fn run(&self, cx: &Cx<'a, '_>, node: &mut Node<'a>, variant: &Variant<'a>) -> Option<()> {
         match self {
             Apply::Wrap(wrappers) => replace_body(node, cx.alloc, |nodes| {
+                let scoped = wrappers.iter().any(|w| matches!(w, Wrapper::AtRule("@scope", _)));
+                let nodes = if scoped { one(cx.alloc, from_source(Source::User, nodes)) } else { nodes };
                 let mut out = Vec::with_capacity_in(wrappers.len(), cx.alloc);
                 if let Some((last, rest)) = wrappers.split_last() {
                     out.extend(rest.iter().map(|w| w.wrap(clone_in(&nodes, cx.alloc))));
                     out.push(last.wrap(nodes));
                 }
-                out
+                if scoped { one(cx.alloc, from_source(Source::Variant, out)) } else { out }
             }),
-            Apply::Body(body) => replace_body(node, cx.alloc, |nodes| {
+            &Apply::Body(body, scoped) => replace_body(node, cx.alloc, |nodes| {
                 let mut out = clone_in(body, cx.alloc);
-                substitute_at_slot(&mut out, &nodes, cx.alloc);
-                out
+                if scoped {
+                    substitute_at_slot(&mut out, &one(cx.alloc, from_source(Source::User, nodes)), cx.alloc);
+                    one(cx.alloc, from_source(Source::Variant, out))
+                } else {
+                    substitute_at_slot(&mut out, &nodes, cx.alloc);
+                    out
+                }
             }),
             Apply::Fn(f) => f(cx, node, variant),
         }
@@ -358,6 +365,10 @@ fn replace_body<'a>(node: &mut Node<'a>, alloc: &'a Allocator, f: impl FnOnce(No
     Some(())
 }
 
+fn from_source(source: Source, nodes: Nodes<'_>) -> Node<'_> {
+    Node::Context { ctx: Ctx { source: Some(source), ..Ctx::default() }, nodes }
+}
+
 #[inline]
 fn one<'a>(alloc: &'a Allocator, node: Node<'a>) -> Nodes<'a> {
     Builder::new(alloc).vec1(node)
@@ -369,7 +380,13 @@ pub fn apply_variant<'a>(cx: &Cx<'a, '_>, node: &mut Node<'a>, variant: &Variant
             if relative && depth == 0 {
                 return None;
             }
-            replace_body(node, cx.alloc, |nodes| one(cx.alloc, Builder::new(cx.alloc).rule(selector, nodes)))
+            replace_body(node, cx.alloc, |nodes| match Builder::new(cx.alloc).rule(selector, nodes) {
+                Node::AtRule { name: "@scope", params, nodes } => {
+                    let scope = Node::AtRule { name: "@scope", params, nodes: one(cx.alloc, from_source(Source::User, nodes)) };
+                    one(cx.alloc, from_source(Source::Variant, one(cx.alloc, scope)))
+                }
+                rule => one(cx.alloc, rule),
+            })
         }
         Variant::Compound { root, variant: inner, .. } => {
             let entry = variants.get(root)?;
@@ -436,7 +453,12 @@ pub fn body_compounds(body: &[Node<'_>]) -> (Compounds, bool) {
 
 /// Registers a `@custom-variant` with a body whose `@variant` rules were already substituted.
 pub fn register_custom_body<'a>(v: &mut Variants<'a>, name: &'a str, body: Nodes<'a>, compounds: Compounds) {
-    v.static_data(name, compounds, Apply::Body(body.into_bump_slice()));
+    let mut scoped = false;
+    walk(&body, &mut |node| {
+        scoped |= node.is_at_rule("@scope");
+        !scoped
+    });
+    v.static_data(name, compounds, Apply::Body(body.into_bump_slice(), scoped));
 }
 
 pub fn substitute_at_slot<'a>(ast: &mut Nodes<'a>, nodes: &Nodes<'a>, alloc: &'a Allocator) {
@@ -728,35 +750,23 @@ fn is_supports_function(value: &str) -> bool {
 }
 
 fn space_logical_operators<'a>(alloc: &'a Allocator, value: &'a str) -> &'a str {
-    let b = value.as_bytes();
-    let mut out = ArenaString::with_capacity_in(value.len() + 8, alloc);
-    let mut last = 0;
-    let mut i = 0;
-    while i < b.len() {
-        if i > 0 && is_word_byte(b[i - 1]) || !is_word_byte(b[i]) {
-            i += 1;
-            continue;
-        }
-        let word = ["and", "or", "not"]
-            .into_iter()
-            .find(|w| b[i..].starts_with(w.as_bytes()) && !b.get(i + w.len()).copied().is_some_and(is_word_byte));
-        match word {
-            Some(w) => {
-                out.push_str(&value[last..i]);
-                out.push(' ');
-                out.push_str(w);
-                out.push(' ');
-                i += w.len();
-                last = i;
+    fn space<'a>(nodes: &mut [ValueNode<'a>]) -> bool {
+        let mut changed = false;
+        for node in nodes {
+            if let ValueNode::Function(name, children) = node
+                && *name != "selector"
+            {
+                if let Some(spaced) = [" and ", " or ", " not "].into_iter().find(|w| w.trim() == *name) {
+                    *name = spaced;
+                    changed = true;
+                }
+                changed |= space(children);
             }
-            None => i += 1,
         }
+        changed
     }
-    if last == 0 {
-        return value;
-    }
-    out.push_str(&value[last..]);
-    out.into_bump_str()
+    let mut ast = value_parser::parse(value, alloc);
+    if space(&mut ast) { alloc.str(&value_parser::to_string(&ast)) } else { value }
 }
 
 fn breakpoint<'a>(theme: &Theme<'a>, variant: &Variant<'a>) -> Option<&'a str> {

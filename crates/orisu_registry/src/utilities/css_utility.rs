@@ -213,6 +213,10 @@ fn track_spacing(nodes: &[ValueNode<'_>], storage: &mut [Storage<'_>; 2]) -> boo
 }
 
 fn normalize_arg(arg: &str) -> String {
+    let arg = arg.trim_matches(is_js_whitespace);
+    if arg.starts_with("--default(") {
+        return arg.to_owned();
+    }
     let arg = arg.replace("\\*", "*");
     let arg = join_theme_keys(&arg);
     let mut out: String = arg.chars().filter(|c| !is_js_whitespace(*c)).collect();

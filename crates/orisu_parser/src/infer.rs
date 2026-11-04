@@ -434,8 +434,9 @@ fn is_fraction(value: &str) -> bool {
 }
 
 const LENGTH_UNITS: &[&str] = &[
-    "cm", "mm", "Q", "in", "pc", "pt", "px", "em", "ex", "ch", "rem", "lh", "rlh", "vw", "vh", "vmin", "vmax", "vb", "vi", "svw", "svh",
-    "lvw", "lvh", "dvw", "dvh", "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax",
+    "cm", "mm", "Q", "in", "pc", "pt", "px", "em", "ex", "ch", "cap", "ic", "rem", "rex", "rch", "rcap", "ric", "lh", "rlh", "vw", "vh",
+    "vmin", "vmax", "vb", "vi", "svw", "svh", "svi", "svb", "svmin", "svmax", "lvw", "lvh", "lvi", "lvb", "lvmin", "lvmax", "dvw", "dvh",
+    "dvi", "dvb", "dvmin", "dvmax", "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax",
 ];
 
 pub fn is_length(value: &str) -> bool {

@@ -42,30 +42,36 @@ pub fn compare(a: &str, z: &str) -> Ordering {
     a.len().cmp(&z.len())
 }
 
-pub fn parse_int(s: &str) -> Option<i64> {
+/// `parseFloat`: the longest numeric prefix after leading whitespace.
+fn parse_float(s: &str) -> Option<f64> {
     let s = s.trim_start();
     let bytes = s.as_bytes();
-    let mut i = 0;
-    let neg = match bytes.first() {
-        Some(b'-') => {
-            i = 1;
-            true
+    let digits = |mut i: usize| {
+        while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
         }
-        Some(b'+') => {
-            i = 1;
-            false
-        }
-        _ => false,
+        i
     };
-    let start = i;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
+    let sign = usize::from(matches!(bytes.first(), Some(b'-' | b'+')));
+    if s[sign..].starts_with("Infinity") {
+        return Some(if bytes[0] == b'-' { f64::NEG_INFINITY } else { f64::INFINITY });
     }
-    if i == start {
+    let int_end = digits(sign);
+    let mut end = int_end;
+    if bytes.get(end) == Some(&b'.') {
+        end = digits(end + 1);
+    }
+    if end == sign || (int_end == sign && end == sign + 1) {
         return None;
     }
-    let n: i64 = s[start..i.min(start + 18)].parse().ok()?;
-    Some(if neg { -n } else { n })
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let exponent = end + 1 + usize::from(matches!(bytes.get(end + 1), Some(b'-' | b'+')));
+        let exponent_end = digits(exponent);
+        if exponent_end > exponent {
+            end = exponent_end;
+        }
+    }
+    s[..end].parse().ok()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,12 +95,13 @@ pub fn compare_breakpoints(a: &str, z: &str, direction: Direction) -> Ordering {
     if ab != zb {
         return ab.cmp(&zb);
     }
-    match (parse_int(a), parse_int(z)) {
-        (Some(x), Some(y)) => match direction {
-            Direction::Asc => x.cmp(&y),
-            Direction::Desc => y.cmp(&x),
-        },
-        _ => {
+    let order = match direction {
+        Direction::Asc => parse_float(a).zip(parse_float(z)).and_then(|(x, y)| (x - y).partial_cmp(&0.0)),
+        Direction::Desc => parse_float(a).zip(parse_float(z)).and_then(|(x, y)| (y - x).partial_cmp(&0.0)),
+    };
+    match order {
+        Some(order) => order,
+        None => {
             if a < z {
                 Ordering::Less
             } else {

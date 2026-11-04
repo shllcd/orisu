@@ -2,8 +2,8 @@
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
 use indexmap::IndexSet;
-use orisu_allocator::{Allocator, ArenaString};
-use orisu_ast::{Builder, Node, Nodes};
+use orisu_allocator::{AllocExt, Allocator, ArenaString};
+use orisu_ast::{Builder, Ctx, Node, Nodes, Source};
 use orisu_parser::misc::extract_used_variables;
 use orisu_parser::segment::segment;
 use orisu_parser::selector::{self as sp, SNode};
@@ -281,6 +281,18 @@ impl<'a, 'th: 'a> State<'a, '_, 'th> {
                     }
                     return;
                 }
+                if node_ctx.source.is_some() {
+                    self.path.push(parent.len());
+                    let mut out = self.b.vec();
+                    for child in nodes {
+                        self.transform(child, &mut out, root, ctx, depth);
+                    }
+                    self.path.pop();
+                    if !out.is_empty() {
+                        parent.push(Node::Context { ctx: Ctx { source: node_ctx.source, ..Ctx::default() }, nodes: out });
+                    }
+                    return;
+                }
                 for child in nodes {
                     self.transform(child, parent, root, ctx, depth);
                 }
@@ -493,7 +505,7 @@ pub fn splice_context<'a>(ast: &[Node<'a>], path: &[usize]) -> Option<SpliceCont
                 in_context = true;
                 nodes = children;
             }
-            &Node::AtRule { name, params, nodes: ref children } if HOISTABLE.contains(&name) => {
+            &Node::AtRule { name, params, nodes: ref children } if name != "@scope" && HOISTABLE.contains(&name) => {
                 if name == "@supports" && params.contains("color-mix(") {
                     cx.ctx.supports_color_mix = true;
                 }
@@ -677,8 +689,82 @@ fn inline_vars<'a, 'th: 'a>(
     }
 }
 
-const HOISTABLE: &[&str] = &["@container", "@layer", "@media", "@page", "@starting-style", "@supports", "@view-transition"];
-const DROPPABLE_IF_EMPTY: &[&str] = &["@container", "@media", "@page", "@starting-style", "@supports", "@view-transition"];
+const HOISTABLE: &[&str] = &["@container", "@layer", "@media", "@page", "@scope", "@starting-style", "@supports", "@view-transition"];
+const DROPPABLE_IF_EMPTY: &[&str] = &["@container", "@media", "@page", "@scope", "@starting-style", "@supports", "@view-transition"];
+
+/// Unknown pseudo-elements such as `::ng-deep` or `::v-deep` may be rewritten by another compiler, so only these are known
+/// to end a selector. Functional ones are listed without their arguments.
+const STANDARD_PSEUDO_ELEMENTS: &[&str] = &[
+    "::after",
+    "::backdrop",
+    "::before",
+    "::checkmark",
+    "::column",
+    "::cue",
+    "::cue-region",
+    "::details-content",
+    "::file-selector-button",
+    "::first-letter",
+    "::first-line",
+    "::grammar-error",
+    "::highlight",
+    "::marker",
+    "::part",
+    "::picker",
+    "::picker-icon",
+    "::placeholder",
+    "::scroll-button",
+    "::scroll-marker",
+    "::scroll-marker-group",
+    "::search-text",
+    "::selection",
+    "::slotted",
+    "::spelling-error",
+    "::target-text",
+    "::view-transition",
+    "::view-transition-group",
+    "::view-transition-group-children",
+    "::view-transition-image-pair",
+    "::view-transition-new",
+    "::view-transition-old",
+];
+
+fn is_standard_pseudo_element(node: &SNode<'_>) -> bool {
+    let (SNode::Selector(value) | SNode::Function(value, _)) = node else {
+        return false;
+    };
+    sp::is_pseudo_element(value)
+        && (!value.starts_with("::") || value.starts_with("::-") || STANDARD_PSEUDO_ELEMENTS.iter().any(|p| p.eq_ignore_ascii_case(value)))
+}
+
+/// A pseudo-element can only be followed by pseudo-classes, so a selector with a combinator after one matches nothing.
+fn can_never_match(ast: &[SNode<'_>]) -> bool {
+    !ast.is_empty() && ast.iter().all(is_dead_selector)
+}
+
+fn is_dead_selector(node: &SNode<'_>) -> bool {
+    match node {
+        SNode::List(nodes) => nodes.iter().all(is_dead_selector),
+        SNode::Complex(nodes) => nodes.iter().enumerate().any(|(i, child)| match child {
+            SNode::Combinator(_) => i > 0 && is_pseudo_element_end(&nodes[i - 1]),
+            child => is_dead_selector(child),
+        }),
+        SNode::Compound(nodes) => nodes.iter().any(is_dead_selector),
+        SNode::Function(name, nodes) => matches!(*name, ":is" | ":where") && can_never_match(nodes),
+        _ => false,
+    }
+}
+
+fn is_pseudo_element_end(node: &SNode<'_>) -> bool {
+    match node {
+        SNode::Compound(nodes) => nodes.iter().any(is_standard_pseudo_element),
+        node => is_standard_pseudo_element(node),
+    }
+}
+
+fn contains_scope(nodes: &[Node<'_>]) -> bool {
+    nodes.iter().any(|node| node.is_at_rule("@scope") || node.children().is_some_and(|children| contains_scope(children)))
+}
 
 enum Cursor {
     None,
@@ -794,7 +880,9 @@ impl<'a> NestCtx<'a, '_> {
 
 struct Nester<'a, 'f> {
     b: Builder<'a>,
-    selector_stack: Vec<&'a str>,
+    /// Each selector and whether it can never match anything.
+    selector_stack: Vec<(&'a str, bool)>,
+    source: Option<Source>,
     at_rule_stack: Vec<(&'a str, &'a str)>,
     cursor: Cursor,
     seen_props: FxHashSet<&'a str>,
@@ -809,6 +897,7 @@ impl<'a, 'f> Nester<'a, 'f> {
         Nester {
             b,
             selector_stack: Vec::new(),
+            source: None,
             at_rule_stack,
             cursor: Cursor::None,
             seen_props: FxHashSet::default(),
@@ -882,58 +971,152 @@ impl<'a, 'f> Nester<'a, 'f> {
         }
     }
 
-    fn nested_selector(&mut self, selector: &'a str, last: &'a str) -> &'a str {
+    /// Replaces each `&` in `selector` with `last`, or prefixes `selector` with it when there is none.
+    fn substitute(&mut self, selector: &'a str, last: &'a str, out: &mut ArenaString<'a>) {
         let alloc = self.b.alloc;
         let parent_ast = self.parse_cache.entry(last).or_insert_with(|| sp::parse_in(last, alloc));
         let last_is_list = parent_ast.len() == 1 && matches!(parent_ast[0], SNode::List(_));
         let wrapped: &'a str = orisu_allocator::afmt!(alloc, ":is({last})");
-        let prefix = if last_is_list { wrapped } else { last };
-        let nctx = NestCtx { last, wrapped, parent_ast };
-        let mut out = ArenaString::with_capacity_in(selector.len() + last.len() * 2, alloc);
-        for (n, part) in segment(selector, b',').into_iter().enumerate() {
-            if n > 0 {
-                out.push_str(", ");
+        if selector.contains('&') {
+            let nctx = NestCtx { last, wrapped, parent_ast };
+            let mut ast = sp::parse_in(selector, alloc);
+            let mut changed = false;
+            nctx.replace(&mut ast, None, None, &mut changed);
+            if changed {
+                sp::write_css(&ast, out, false);
+                return;
             }
-            if part.contains('&') {
-                let mut ast = sp::parse_in(part, alloc);
-                let mut changed = false;
-                nctx.replace(&mut ast, None, None, &mut changed);
-                if changed {
-                    sp::write_css(&ast, &mut out, false);
-                    continue;
-                }
-            }
-            out.push_str(prefix);
-            out.push(' ');
-            out.push_str(part);
         }
-        out.into_bump_str()
+        out.push_str(if last_is_list { wrapped } else { last });
+        out.push(' ');
+        out.push_str(selector);
     }
 
+    fn can_never_match(&self, selector: &str) -> bool {
+        selector.contains(':')
+            && selector.bytes().any(|b| matches!(b, b' ' | b'>' | b'+' | b'~'))
+            && can_never_match(&sp::parse_in(self.b.alloc.str(selector), self.b.alloc))
+    }
+
+    fn is_dead(&self) -> bool {
+        self.selector_stack.last().is_some_and(|&(_, dead)| dead)
+    }
+
+    /// `false` for a nested `&` rule, which only groups its children.
     fn enter_rule(&mut self, selector: &'a str) -> bool {
+        let alloc = self.b.alloc;
         if self.selector_stack.is_empty() {
             if selector.contains('&') {
-                let mut ast = sp::parse_in(selector, self.b.alloc);
+                let scope = if self.at_rule_stack.iter().any(|&(name, _)| name == "@scope") { ":where(:scope)" } else { ":scope" };
+                let mut ast = sp::parse_in(selector, alloc);
                 let mut changed = false;
                 sp::walk_mut(&mut ast, &mut |n| {
                     if matches!(n, SNode::Selector("&")) {
                         changed = true;
-                        *n = SNode::Selector(":scope");
+                        *n = SNode::Selector(scope);
                     }
                 });
-                self.selector_stack.push(if changed { sp::to_css(&ast, self.b.alloc) } else { selector });
+                self.selector_stack.push((if changed { sp::to_css(&ast, alloc) } else { selector }, false));
             } else {
-                self.selector_stack.push(selector);
+                self.selector_stack.push((selector, false));
             }
             return true;
         }
         if selector == "&" {
             return false;
         }
-        let last = self.selector_stack.last().copied().unwrap_or_default();
-        let nested = self.nested_selector(selector, last);
-        self.selector_stack.push(nested);
+        let last = self.selector_stack.last().map_or("", |&(s, _)| s);
+        let mut all = ArenaString::with_capacity_in(selector.len() + last.len() * 2, alloc);
+        let mut live = Vec::new();
+        let mut any_dead = false;
+        for (n, part) in segment(selector, b',').into_iter().enumerate() {
+            if n > 0 {
+                all.push_str(", ");
+            }
+            let start = all.len();
+            self.substitute(part, last, &mut all);
+            if self.can_never_match(&all[start..]) {
+                any_dead = true;
+            } else {
+                live.push(start..all.len());
+            }
+        }
+        let entry = if !any_dead || live.is_empty() {
+            (all.into_bump_str(), any_dead)
+        } else {
+            let mut out = ArenaString::with_capacity_in(all.len(), alloc);
+            for (n, range) in live.into_iter().enumerate() {
+                if n > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&all[range]);
+            }
+            (out.into_bump_str(), false)
+        };
+        self.selector_stack.push(entry);
         true
+    }
+
+    /// Resolves the `&` in the preludes of an `@scope` rule; `None` when nothing can be in scope. The second value is
+    /// whether the scope start took over the parent selector, so the rules inside resolve like top-level rules.
+    fn scope_params(&mut self, params: &'a str) -> Option<(&'a str, bool)> {
+        let alloc = self.b.alloc;
+        let is_variant = self.source == Some(Source::Variant);
+        let parent = self.selector_stack.last().map(|&(s, _)| s);
+        if !params.contains('&') && (is_variant || parent.is_none()) {
+            return Some((params, false));
+        }
+        let mut ast = vp::parse(params, alloc);
+        let mut is_end = false;
+        let mut consumed = false;
+        let mut start = None;
+        for node in ast.iter_mut() {
+            let ValueNode::Function(name, children) = node else {
+                if matches!(node, ValueNode::Word("to")) {
+                    is_end = true;
+                }
+                continue;
+            };
+            if !name.is_empty() {
+                continue;
+            }
+            let selector = vp::to_css(children, alloc);
+            let mut out = ArenaString::new_in(alloc);
+            if !is_end
+                && !is_variant
+                && let Some(parent) = parent
+            {
+                for (n, part) in segment(selector, b',').into_iter().enumerate() {
+                    if n > 0 {
+                        out.push_str(", ");
+                    }
+                    self.substitute(part.trim(), parent, &mut out);
+                }
+                consumed = true;
+            } else if selector.contains('&') {
+                let replacement = if is_end { ":where(:scope)" } else { parent.unwrap_or(":scope") };
+                self.substitute(selector, replacement, &mut out);
+                consumed |= !is_end && parent.is_some();
+            } else {
+                if !is_end {
+                    start = Some(selector);
+                }
+                continue;
+            }
+            let resolved = out.into_bump_str();
+            *children = orisu_allocator::Vec::from_iter_in([ValueNode::Word(resolved)], alloc);
+            if !is_end {
+                start = Some(resolved);
+            }
+        }
+        if consumed
+            && let Some(start) = start
+            && self.is_dead()
+            && self.can_never_match(start)
+        {
+            return None;
+        }
+        Some((vp::to_css(&ast, alloc), consumed))
     }
 
     fn visit(&mut self, node: Node<'a>) {
@@ -946,7 +1129,7 @@ impl<'a, 'f> Nester<'a, 'f> {
                     }
                     return;
                 }
-                if nodes.iter().any(|c| matches!(c, Node::Decl { .. })) {
+                if !self.is_dead() && nodes.iter().any(|c| matches!(c, Node::Decl { .. })) && !contains_scope(&nodes) {
                     for child in nodes {
                         self.emit(child);
                     }
@@ -958,11 +1141,34 @@ impl<'a, 'f> Nester<'a, 'f> {
                 self.cursor = Cursor::None;
                 self.selector_stack.pop();
             }
-            Node::AtRule { name, params, nodes } => {
+            Node::AtRule { name, params, mut nodes } => {
                 self.cursor = Cursor::None;
+                if self.is_dead() {
+                    if name == "@layer" && nodes.is_empty() {
+                        let dead = std::mem::take(&mut self.selector_stack);
+                        self.emit(Node::AtRule { name, params, nodes });
+                        self.selector_stack = dead;
+                        return;
+                    }
+                    if nodes.is_empty() || !HOISTABLE.contains(&name) {
+                        return;
+                    }
+                }
                 if (nodes.is_empty() && !DROPPABLE_IF_EMPTY.contains(&name)) || !HOISTABLE.contains(&name) {
                     self.emit(Node::AtRule { name, params, nodes });
                     return;
+                }
+                let mut params = params;
+                let mut masked = None;
+                if name == "@scope" {
+                    self.group_scope_declarations(&mut nodes);
+                    let Some((resolved, consumed)) = self.scope_params(params) else {
+                        return;
+                    };
+                    params = resolved;
+                    if consumed {
+                        masked = Some(std::mem::take(&mut self.selector_stack));
+                    }
                 }
                 self.at_rule_stack.push((name, params));
                 for child in nodes {
@@ -970,13 +1176,49 @@ impl<'a, 'f> Nester<'a, 'f> {
                 }
                 self.cursor = Cursor::None;
                 self.at_rule_stack.pop();
+                if let Some(stack) = masked {
+                    self.selector_stack = stack;
+                }
             }
             Node::Comment(c) if std::ptr::eq(c, FRAGMENTS) => self.splice(),
+            Node::Decl { .. } | Node::Comment(_) if self.is_dead() => {}
             node @ (Node::Decl { .. } | Node::Comment(_)) => self.emit(node),
-            Node::Context { nodes, .. } | Node::AtRoot(nodes) => {
+            Node::Context { ctx, nodes } => {
+                let source = self.source;
+                if ctx.source.is_some() {
+                    self.source = ctx.source;
+                }
                 for child in nodes {
                     self.visit(child);
                 }
+                self.source = source;
+            }
+            Node::AtRoot(nodes) => {
+                for child in nodes {
+                    self.visit(child);
+                }
+            }
+        }
+    }
+
+    /// Lightning CSS rejects declarations directly in `@scope`, so they get wrapped in `&` rules.
+    fn group_scope_declarations(&self, nodes: &mut Nodes<'a>) {
+        let old = std::mem::replace(nodes, self.b.vec());
+        let mut in_group = false;
+        for mut child in old {
+            if let Node::Context { nodes: children, .. } = &mut child {
+                self.group_scope_declarations(children);
+            }
+            if matches!(child, Node::Decl { .. } | Node::Comment(_)) {
+                if in_group && let Some(Node::Rule { nodes: group, .. }) = nodes.last_mut() {
+                    group.push(child);
+                } else {
+                    nodes.push(Node::Rule { selector: "&", nodes: self.b.vec1(child) });
+                    in_group = true;
+                }
+            } else {
+                in_group = false;
+                nodes.push(child);
             }
         }
     }
@@ -1044,7 +1286,7 @@ impl<'a, 'f> Nester<'a, 'f> {
         let k = self.at_rule_stack.len() - offset;
         let mut built: Option<Node<'a>> = None;
         let mut nodes = Some(self.b.vec1(node));
-        if let Some(&selector) = self.selector_stack.last() {
+        if let Some(&(selector, _)) = self.selector_stack.last() {
             if k == 0
                 && let Some(target) = container_mut(&mut self.result, &target_path)
                 && let Some(Node::Rule { selector: ls, nodes: children }) = target.last_mut()

@@ -230,7 +230,7 @@ fn modernize_selector<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>, sele
             match pseudo_variant(cx, variant, target_node, &mut compound_not) {
                 None => {
                     let prefix = prefix?;
-                    let selector = if is_pseudo_element(value) { alloc.str(&format!("&{value}")) } else { value };
+                    let selector = if sp::is_pseudo_element(value) { alloc.str(&format!("&{value}")) } else { value };
                     return Some((Some(prefix), alloc.alloc(Variant::Arbitrary { selector, relative: false })));
                 }
                 Some(name) => parse(cx, &if compound_not { format!("not-{name}") } else { name })?,
@@ -262,11 +262,6 @@ fn modernize_selector<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>, sele
         _ => variant,
     };
     Some((prefix, replacement))
-}
-
-/// Pseudo-elements can't be used inside `&:is(…)`, so moving one into `*` or `**` keeps its `&`.
-fn is_pseudo_element(value: &str) -> bool {
-    value.starts_with("::") || [":before", ":after", ":first-line", ":first-letter"].iter().any(|p| value.eq_ignore_ascii_case(p))
 }
 
 fn parse<'a>(cx: &mut Canon<'a, '_>, input: &str) -> Option<&'a Variant<'a>> {

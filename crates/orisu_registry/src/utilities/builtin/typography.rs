@@ -91,6 +91,9 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
                     if let Some(v) = cx.resolve_theme_color(value, modifier, &["--stroke", "--color"]) {
                         return cx.one("stroke", v);
                     }
+                    if modifier.is_some() {
+                        return None;
+                    }
                     if let Some(v) = cx.resolve(Some(value), &["--stroke-width"]).filter(|v| !v.is_empty()) {
                         return cx.one("stroke-width", v);
                     }

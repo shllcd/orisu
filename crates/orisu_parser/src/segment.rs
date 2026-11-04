@@ -81,6 +81,8 @@ pub fn is_valid_arbitrary(input: &str) -> bool {
                 }
                 if stack.last() == Some(&ch) {
                     stack.pop();
+                } else if ch != b'}' {
+                    return false;
                 }
             }
             b';' if stack.is_empty() => return false,
@@ -88,5 +90,5 @@ pub fn is_valid_arbitrary(input: &str) -> bool {
         }
         idx += 1;
     }
-    true
+    stack.is_empty()
 }

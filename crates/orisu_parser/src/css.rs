@@ -176,10 +176,15 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
                 let mut colon = None;
                 let mut j = i + 2;
                 let mut value = None;
+                let mut value_end = 0;
                 while j < len {
                     let c = bytes[j];
-                    if !CUSTOM_PROPERTY.has(c) && j + 1 < len {
-                        j = CUSTOM_PROPERTY.find(bytes, j).map_or(len - 1, |n| n.min(len - 1));
+                    if !CUSTOM_PROPERTY.has(c) {
+                        let end = CUSTOM_PROPERTY.find(bytes, j).unwrap_or(len);
+                        if let Some(last) = bytes[j..end].iter().rposition(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r')) {
+                            value_end = j + last + 1 - start;
+                        }
+                        j = end;
                         continue;
                     }
                     match c {
@@ -189,6 +194,8 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
                             if let Some(end) = comment_end(bytes, j + 2) {
                                 j = end;
                             }
+                            j += 1;
+                            continue;
                         }
                         b':' if colon.is_none() => colon = Some(j - start),
                         b';' if nested.is_empty() => {
@@ -199,7 +206,7 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
                         b'(' => nested.push(b')'),
                         b'[' => nested.push(b']'),
                         b'{' => nested.push(b'}'),
-                        _ if (c == b'}' || j == len - 1) && nested.is_empty() => {
+                        b'}' if nested.is_empty() => {
                             value = Some(&input[start..j]);
                             i = j - 1;
                             break;
@@ -209,15 +216,17 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
                         }
                         _ => {}
                     }
+                    value_end = (j + 1).min(len) - start;
                     j += 1;
                 }
                 let Some(colon) = colon else {
                     return Err(error("Invalid custom property, expected a value", Some(start)));
                 };
-                let declaration = match value {
-                    Some(value) => parse_declaration(value, colon),
-                    None => Node::Decl { property: "", value: Some(""), important: false },
-                };
+                let value = value.unwrap_or_else(|| {
+                    i = len;
+                    &input[start..]
+                });
+                let declaration = parse_declaration(value, colon, value_end.min(value.len()));
                 push_node!(declaration);
                 buf.clear();
             }
@@ -228,7 +237,7 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
             b';' if closing.last() != Some(&b')') => {
                 let text = buf.take();
                 match text.find(':') {
-                    Some(colon) => push_node!(parse_declaration(text, colon)),
+                    Some(colon) => push_node!(parse_declaration(text, colon, text.len())),
                     None if text.is_empty() => {}
                     None => {
                         return Err(error(format!("Invalid declaration: `{}`", trim(text)), Some(i)));
@@ -259,7 +268,7 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
                             let Some(colon) = text.find(':') else {
                                 return Err(error(format!("Invalid declaration: `{}`", trim(text)), Some(i)));
                             };
-                            push_node!(parse_declaration(text, colon));
+                            push_node!(parse_declaration(text, colon, text.len()));
                         }
                     }
                 }
@@ -292,6 +301,11 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
     if buf.first() == Some(b'@') {
         let text = buf.take();
         ast.push(parse_at_rule(text, Vec::new_in(alloc)));
+    } else if !buf.is_empty() && closing.is_empty() {
+        let text = buf.take();
+        if let Some(colon) = text.find(':') {
+            ast.push(parse_declaration(text, colon, text.len()));
+        }
     }
 
     if !closing.is_empty()
@@ -313,33 +327,39 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
     }
 }
 
-fn parse_declaration(buffer: &str, colon: usize) -> Node<'_> {
-    let important = find_important(buffer.as_bytes(), colon + 1);
-    Node::Decl {
-        property: trim(&buffer[..colon]),
-        value: Some(trim(&buffer[colon + 1..important.unwrap_or(buffer.len())])),
-        important: important.is_some(),
+/// `value_end` is where the value ends without the trailing whitespace and comments a custom property keeps;
+/// `!important` is the flag only right before it.
+fn parse_declaration(buffer: &str, colon: usize, value_end: usize) -> Node<'_> {
+    let property = trim(&buffer[..colon]);
+    let value = trim_value(buffer.get(colon + 1..value_end).unwrap_or(""));
+    if let Some(rest) = value.strip_suffix("!important")
+        && !is_escaped(value, rest.len())
+    {
+        return Node::Decl { property, value: Some(trim_value(rest)), important: true };
     }
+    Node::Decl { property, value: Some(trim_value(&buffer[colon + 1..])), important: false }
+}
+
+/// Trims like [`trim`], but keeps an escaped whitespace at the end, as in `a\ !important`.
+fn trim_value(value: &str) -> &str {
+    let trimmed = trim(value);
+    let start = trimmed.as_ptr().addr() - value.as_ptr().addr();
+    let end = start + trimmed.len();
+    if end < value.len() && is_escaped(value, end) {
+        let escaped = value[end..].chars().next().map_or(0, char::len_utf8);
+        return &value[start..end + escaped];
+    }
+    trimmed
+}
+
+/// Whether an odd number of `\` precedes `idx`.
+fn is_escaped(value: &str, idx: usize) -> bool {
+    value.as_bytes()[..idx].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1
 }
 
 #[inline]
-fn find_important(bytes: &[u8], from: usize) -> Option<usize> {
-    bytes[from..].iter().enumerate().find(|&(i, &b)| b == b'!' && bytes[from + i + 1..].starts_with(b"important")).map(|(i, _)| from + i)
-}
-
-#[inline]
-fn comment_end(bytes: &[u8], mut from: usize) -> Option<usize> {
-    while let Some(offset) = memchr::memchr2(b'*', b'\\', &bytes[from.min(bytes.len())..]) {
-        let at = from + offset;
-        if bytes[at] == b'\\' {
-            from = at + 2;
-        } else if bytes.get(at + 1) == Some(&b'/') {
-            return Some(at + 1);
-        } else {
-            from = at + 1;
-        }
-    }
-    None
+fn comment_end(bytes: &[u8], from: usize) -> Option<usize> {
+    memchr::memmem::find(&bytes[from.min(bytes.len())..], b"*/").map(|offset| from + offset + 1)
 }
 
 fn parse_string(input: &str, start: usize, quote: u8) -> Result<usize, CssSyntaxError> {
