@@ -1,6 +1,7 @@
 use std::fs::{self, Metadata};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
@@ -51,7 +52,7 @@ impl Stat {
     }
 }
 
-/// Candidates per file, keyed by blake3 of the scanner version, the extraction options, the extension and the
+/// Candidates per file, keyed by blake3 of the scanner sources, the extraction options, the extension and the
 /// content, and persisted in one file so later processes skip extraction for unchanged files. Files whose stat
 /// did not change since they were hashed are looked up without being read.
 #[derive(Debug, Clone)]
@@ -72,7 +73,7 @@ impl Cache {
     /// Starts empty when the file is missing, corrupt or written by another version or with other `options`.
     pub fn open(path: PathBuf, options: &str) -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(env!("CARGO_PKG_VERSION").as_bytes()).update(&[0]).update(options.as_bytes());
+        hasher.update(env!("ORISU_SCANNER_SOURCE_HASH").as_bytes()).update(&[0]).update(options.as_bytes());
         let salt = *hasher.finalize().as_bytes();
         let decoded = fs::read(&path).ok().and_then(|bytes| decode(&bytes, &salt));
         let (text, ends, entries, stats, walk) = decoded.unwrap_or_default();
@@ -179,12 +180,23 @@ impl Cache {
         if let Some(dir) = self.path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let tmp = self.path.with_extension("tmp");
-        let mut file = io::BufWriter::new(fs::File::create(&tmp)?);
+        static WRITES: AtomicUsize = AtomicUsize::new(0);
+        let tmp = self.path.with_extension(format!("{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
+        let written = self.write(&tmp, &order, &remap).and_then(|()| fs::rename(&tmp, &self.path));
+        if written.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        written?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn write(&self, tmp: &Path, order: &[u32], remap: &FxHashMap<u32, u32>) -> io::Result<()> {
+        let mut file = io::BufWriter::new(fs::File::create(tmp)?);
         file.write_all(MAGIC)?;
         file.write_all(&self.salt)?;
         file.write_all(&(order.len() as u32).to_le_bytes())?;
-        for &id in &order {
+        for &id in order {
             let candidate = self.str(id);
             file.write_all(&(candidate.len() as u32).to_le_bytes())?;
             file.write_all(candidate.as_bytes())?;
@@ -222,10 +234,7 @@ impl Cache {
                 file.write_all(&[u8::from(*is_dir)])?;
             }
         }
-        file.into_inner().map_err(io::IntoInnerError::into_error)?.sync_all()?;
-        fs::rename(&tmp, &self.path)?;
-        self.dirty = false;
-        Ok(())
+        file.flush()
     }
 }
 

@@ -18,6 +18,11 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 - Output and canonicalization follow Tailwind 4.3.4.
 
+### Fixed
+
+- The scanner no longer turns invalid UTF-8 into strings without checking it.
+- The scanner cache is invalidated when the scanner's code changes, not only on a new version, and concurrent writers no longer share a temporary file.
+
 ## [0.3.0] - 2026-10-31
 
 ### Changed

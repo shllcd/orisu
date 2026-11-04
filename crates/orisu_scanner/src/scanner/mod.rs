@@ -311,12 +311,8 @@ impl Scanner {
                 Extracted::Candidate(s) => {
                     let i = s.as_ptr() as usize - offset;
                     let original = &original_content[i..i + s.len()];
-                    if original.contains_str("-[]") {
-                        return Some(unsafe { (String::from_utf8_unchecked(original.to_vec()), i) });
-                    }
-
-                    // SAFETY: When we parsed the candidates, we already guaranteed that the byte
-                    Some(unsafe { (String::from_utf8_unchecked(s.to_vec()), i) })
+                    let bytes = if original.contains_str("-[]") { original } else { s };
+                    Some((std::str::from_utf8(bytes).ok()?.to_owned(), i))
                 }
 
                 _ => None,
@@ -583,7 +579,7 @@ where
             a
         })
         .into_iter()
-        .map(|s| unsafe { String::from_utf8_unchecked(s.to_vec()) })
+        .filter_map(|bytes| std::str::from_utf8(bytes).ok().map(str::to_owned))
         .collect()
 }
 
