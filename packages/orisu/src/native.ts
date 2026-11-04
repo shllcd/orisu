@@ -30,6 +30,8 @@ export interface CandidateWithPosition {
 
 export interface Scanner {
   scan(): string[];
+  /** Candidates found since the previous scan, sorted. */
+  scanNew(): string[];
   scanFiles(input: ChangedContent[]): string[];
   getCandidatesWithPositions(input: ChangedContent): CandidateWithPosition[];
   readonly files: string[];
@@ -218,23 +220,6 @@ interface Binding {
   lsp(): void;
 }
 
-export const Features = {
-  None: 0,
-  AtApply: 1 << 0,
-  AtImport: 1 << 1,
-  ThemeFunction: 1 << 3,
-  Utilities: 1 << 4,
-  Variants: 1 << 5,
-  AtTheme: 1 << 6,
-} as const;
-
-export const Polyfills = {
-  None: 0,
-  AtProperty: 1 << 0,
-  ColorMix: 1 << 1,
-  All: (1 << 0) | (1 << 1),
-} as const;
-
 const BINDINGS: Record<string, string[]> = {
   "darwin-arm64": ["darwin-arm64"],
   "darwin-x64": ["darwin-x64"],
@@ -293,7 +278,7 @@ export const compile = (css: string, options?: NativeCompileOptions): Compiler =
 
 /**
  * Compiles with asynchronously loaded `@import`s: the binding asks for them synchronously,
- * so every unknown one aborts the attempt, gets loaded, and compilation restarts.
+ * so unknown ones compile as empty, get loaded together, and compilation restarts.
  */
 export const compileAsync = async (
   css: string,
@@ -303,17 +288,23 @@ export const compileAsync = async (
   const sheets = new Map<string, LoadedStylesheet>();
   for (;;) {
     const missing: [string, string][] = [];
+    const loadSheet = (id: string, base: string): LoadedStylesheet => {
+      const sheet = sheets.get(id + "\0" + base);
+      if (sheet) return sheet;
+      missing.push([id, base]);
+      return { path: id, base, content: "" };
+    };
+    let compiler: NativeCompiler | undefined;
+    let failure: unknown;
     try {
-      const loadSheet = (id: string, base: string): LoadedStylesheet => {
-        const sheet = sheets.get(id + "\0" + base);
-        if (sheet) return sheet;
-        missing.push([id, base]);
-        throw new Error(`pending '${id}'`);
-      };
-      return cachingBuild(binding.compile(css, options, loadSheet));
+      compiler = binding.compile(css, options, loadSheet);
     } catch (error) {
-      if (missing.length === 0) throw error;
-      await Promise.all(missing.map(async ([id, base]) => sheets.set(id + "\0" + base, await load(id, base))));
+      failure = error;
     }
+    if (missing.length === 0) {
+      if (compiler) return cachingBuild(compiler);
+      throw failure;
+    }
+    await Promise.all(missing.map(async ([id, base]) => sheets.set(id + "\0" + base, await load(id, base))));
   }
 };

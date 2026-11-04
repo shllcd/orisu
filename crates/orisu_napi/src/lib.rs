@@ -110,6 +110,12 @@ impl Scanner {
         self.scanner.scan()
     }
 
+    /// Scans like `scan`, returning only the candidates no earlier scan of this scanner returned.
+    #[napi]
+    pub fn scan_new(&mut self) -> Vec<String> {
+        self.scanner.scan_new()
+    }
+
     #[napi]
     pub fn scan_files(&mut self, input: Vec<ChangedContent>) -> Vec<String> {
         self.scanner.scan_content(input.into_iter().map(Into::into).collect())

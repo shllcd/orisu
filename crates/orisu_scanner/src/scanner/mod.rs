@@ -102,7 +102,7 @@ impl Scanner {
             .collect();
         let sources = Sources::new(public_source_entries_to_private_source_entries(sources));
 
-        let walker = create_walker(&sources);
+        let walker = create_walker(&sources, None);
 
         Self { sources, walker, manifests, ..Default::default() }
     }
@@ -123,21 +123,26 @@ impl Scanner {
     }
 
     pub fn scan(&mut self) -> Vec<String> {
+        self.scan_new();
+        let mut result = self.candidates.iter().cloned().collect::<Vec<_>>();
+        result.par_sort_unstable();
+        result
+    }
+
+    /// Scans like [`Scanner::scan`], returning only the candidates that no earlier scan found.
+    pub fn scan_new(&mut self) -> Vec<String> {
         self.sources_scanned = false;
 
         let prune = !self.has_scanned_once;
         let (content_paths, css_files, files, mut extracted) = self.discover_sources();
 
         extracted.extend(extract_files(content_paths, self.attributify.as_ref()));
-        self.extract_candidates(vec![], css_files, extracted);
+        let fresh = self.extract_candidates(vec![], css_files, extracted);
         self.scanned_files = files;
         if let Some(cache) = &mut self.cache {
             let _ = cache.save(prune);
         }
-
-        let mut result = self.candidates.iter().cloned().collect::<Vec<_>>();
-        result.par_sort_unstable();
-        result
+        fresh
     }
 
     pub fn scan_content(&mut self, changed_content: Vec<ChangedContent>) -> Vec<String> {
@@ -169,7 +174,15 @@ impl Scanner {
         content_to_scan.extend(known_files);
 
         if !new_unknown_files.is_empty()
-            && let Some(walk_builder) = &mut self.walker
+            && let Some(walk_builder) = create_walker(
+                &self.sources,
+                Some(
+                    new_unknown_files
+                        .iter()
+                        .filter_map(|file| if let ChangedContent::File(file, _) = file { Some(file.clone()) } else { None })
+                        .collect(),
+                ),
+            )
         {
             for entry in walk_builder.build().filter_map(Result::ok) {
                 let path = entry.path();
@@ -672,7 +685,8 @@ fn walk_parallel(walker: &mut WalkBuilder) -> Vec<WalkEntry> {
 }
 
 /// Sets up a WalkBuilder with all source roots, gitignore rules, and source pattern matching.
-fn create_walker(sources: &Sources) -> Option<WalkBuilder> {
+/// With `targets`, the walk only enters directories that contain one of them.
+fn create_walker(sources: &Sources, targets: Option<Vec<PathBuf>>) -> Option<WalkBuilder> {
     let mut other_roots: FxHashSet<&PathBuf> = FxHashSet::default();
     let mut first_root: Option<&PathBuf> = None;
 
@@ -781,6 +795,12 @@ fn create_walker(sources: &Sources) -> Option<WalkBuilder> {
 
     builder.filter_entry(move |entry| {
         let path = entry.path();
+
+        if let Some(targets) = &targets
+            && !targets.iter().any(|target| target.starts_with(path))
+        {
+            return false;
+        }
 
         if entry.file_type().is_some_and(|ft| ft.is_file()) {
             let mut matches = false;

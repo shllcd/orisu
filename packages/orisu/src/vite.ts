@@ -23,6 +23,11 @@ import {
 } from "./index.ts";
 import { encodeMergeTable } from "./table.ts";
 
+interface LintedFile {
+  mtime: number;
+  lines: string[];
+}
+
 const SPECIAL_QUERY_RE = /[?&](?:worker|sharedworker|raw|url)\b/;
 const COMMON_JS_PROXY_RE = /\?commonjs-proxy/;
 const INLINE_STYLE_ID_RE = /[?&]index=\d+\.css$/;
@@ -129,6 +134,7 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
   let onFirstRoot: (() => void) | undefined;
   const firstRoot = new Promise<void>((resolve) => (onFirstRoot = resolve));
   let diagnosticsTimer: ReturnType<typeof setTimeout> | undefined;
+  const diagnosticsByRoot = new WeakMap<Root, { compiler: Compiler; files: Map<string, LintedFile> }>();
   const mangleOptions = opts.mangle ? (opts.mangle === true ? {} : opts.mangle) : null;
   const plans = new Map<string, ManglePlan | null>();
   let savedPlan: ManglePlan | null | undefined;
@@ -147,7 +153,7 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
     if (plan) return JSON.stringify(encodeMergeTable(plan.mergeTable()));
     const root = findRoot(envName);
     if (!root) return JSON.stringify(encodeMergeTable({ prefix: null, keys: [], values: [], erases: [] }));
-    return JSON.stringify(encodeMergeTable(root.compiler!.mergeTable(root.allCandidates)));
+    return JSON.stringify(encodeMergeTable(root.compiler!.mergeTable([...root.candidates])));
   }
 
   function planPath(): string {
@@ -184,7 +190,7 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
         const keep = mangleOptions!.keep ?? [];
         const patterns = keep.filter((entry) => entry instanceof RegExp);
         const kept = keep.filter((entry) => typeof entry === "string");
-        const candidates = root.allCandidates;
+        const candidates = [...root.candidates];
         for (const candidate of candidates) if (patterns.some((pattern) => candidate.search(pattern) !== -1)) kept.push(candidate);
         const outDir = path.resolve(config!.root, (env?.config ?? config!).build.outDir);
         const outDirs = [outDir, path.join(realpathSync(config!.root), path.relative(config!.root, outDir))].map((dir) => dir + path.sep);
@@ -238,7 +244,23 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
     for (const roots of rootsByEnv.values()) {
       for (const root of roots.values()) {
         if (!root.compiler) continue;
-        for (const diagnostic of check(root.inputPath, root.lintedFiles)) lines.push(JSON.stringify(diagnostic) + "\n");
+        const cached = diagnosticsByRoot.get(root);
+        const known = cached?.compiler === root.compiler ? cached.files : new Map<string, LintedFile>();
+        const files = root.lintedFiles;
+        const mtimes = await Promise.all(files.map((file) => fs.stat(file).then((stats) => stats.mtimeMs, () => -1)));
+        const linted = new Map<string, LintedFile>();
+        const stale: string[] = [];
+        files.forEach((file, i) => {
+          const entry = known.get(file);
+          if (entry?.mtime === mtimes[i]) return linted.set(file, entry);
+          linted.set(file, { mtime: mtimes[i]!, lines: [] });
+          stale.push(file);
+        });
+        if (stale.length > 0) {
+          for (const diagnostic of check(root.inputPath, stale)) linted.get(diagnostic.file)?.lines.push(JSON.stringify(diagnostic) + "\n");
+        }
+        diagnosticsByRoot.set(root, { compiler: root.compiler, files: linted });
+        for (const entry of linted.values()) lines.push(...entry.lines);
       }
     }
     await fs.mkdir(path.dirname(file), { recursive: true });
@@ -256,7 +278,7 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
 
   function refreshMergeTable(server: ViteDevServer) {
     const root = findRoot("client");
-    if (!root || root.allCandidates.length === mergeTableKeys) return;
+    if (!root || root.candidates.size === mergeTableKeys) return;
     for (const environment of Object.values(server.environments)) {
       const mod = environment.moduleGraph.getModuleById(MERGE_TABLE_ID);
       if (mod) void environment.reloadModule(mod);
@@ -362,7 +384,7 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
             await Promise.race([firstRoot, new Promise((resolve) => setTimeout(resolve, ROOT_WAIT_MS))]);
           }
           const root = findRoot(this.environment.name);
-          mergeTableKeys = root ? root.allCandidates.length : -1;
+          mergeTableKeys = root ? root.candidates.size : -1;
           return `${header}registerMergeTable(${mergeTable(this.environment.name)});\nimport.meta.hot?.accept();\n`;
         },
       },
@@ -492,7 +514,9 @@ class DefaultMap<K, V> extends Map<K, V> {
 class Root {
   compiler?: Compiler;
   private scanner?: InstanceType<typeof Scanner>;
-  private readonly candidates = new Set<string>();
+  readonly candidates = new Set<string>();
+  private files: string[] = [];
+  private fileSet = new Set<string>();
   private readonly buildDependencies = new Map<string, number | null>();
   private readonly id: string;
   private readonly base: string;
@@ -515,11 +539,11 @@ class Root {
   }
 
   get scannedFiles(): string[] {
-    return this.scanner?.files ?? [];
+    return this.files;
   }
 
-  get allCandidates(): string[] {
-    return [...this.candidates];
+  hasScannedFile(file: string): boolean {
+    return this.fileSet.has(file);
   }
 
   async generate(content: string, watch: (file: string) => void): Promise<{ code: string; map: undefined } | false> {
@@ -532,7 +556,9 @@ class Root {
     const requiresBuild = this.requiresBuild();
     const inputBase = path.dirname(path.resolve(inputPath));
 
+    let rebuild = false;
     if (!this.compiler || !this.scanner || (await requiresBuild)) {
+      rebuild = true;
       this.buildDependencies.clear();
       await this.addBuildDependency(inputPath);
       const dependencies: Promise<void>[] = [];
@@ -564,30 +590,25 @@ class Root {
       return false;
     }
 
+    const added: string[] = [];
     if (features & Features.Utilities) {
-      for (const candidate of this.scanner.scan()) this.candidates.add(candidate);
-      for (const file of this.scanner.files) addWatchFile(file);
+      for (const candidate of this.scanner.scanNew()) {
+        if (this.candidates.has(candidate)) continue;
+        this.candidates.add(candidate);
+        added.push(candidate);
+      }
+      this.files = this.scanner.files;
+      this.fileSet = new Set(this.files);
+      for (const file of this.files) addWatchFile(file);
       for (const glob of this.scanner.globs) {
         if (glob.pattern[0] === "!") continue;
         let relative = path.relative(this.base, glob.base);
         if (relative[0] !== ".") relative = "./" + relative;
         addWatchFile(path.posix.join(normalizePath(relative), glob.pattern));
-
-        const root = this.compiler.root;
-        if (root !== "none" && root !== null) {
-          const basePath = normalizePath(path.resolve(root.base, root.pattern));
-          const isDir = await fs.stat(basePath).then(
-            (stats) => stats.isDirectory(),
-            () => false,
-          );
-          if (!isDir) {
-            throw new Error(`The path given to \`source(…)\` must be a directory but got \`source(${basePath})\` instead.`);
-          }
-        }
       }
     }
 
-    return { code: this.compiler.build([...this.candidates]), map: undefined };
+    return { code: this.compiler.build(rebuild ? [...this.candidates] : added), map: undefined };
   }
 
   private async addBuildDependency(file: string): Promise<void> {
@@ -614,6 +635,7 @@ class Root {
 function isScannedFile(file: string, modules: EnvironmentModuleNode[], roots: Map<string, Root>): boolean {
   const seen = new Set<EnvironmentModuleNode>();
   const queue = [...modules];
+  let next = 0;
   let realpath: string | null | undefined;
   const resolveRealpath = () => {
     if (realpath === undefined) {
@@ -626,16 +648,15 @@ function isScannedFile(file: string, modules: EnvironmentModuleNode[], roots: Ma
     return realpath;
   };
 
-  while (queue.length > 0) {
-    const mod = queue.shift()!;
+  while (next < queue.length) {
+    const mod = queue[next++]!;
     if (seen.has(mod)) continue;
     seen.add(mod);
     const root = mod.id ? roots.get(mod.id) : undefined;
     if (root) {
-      const files = root.scannedFiles;
-      if (files.includes(file)) return true;
+      if (root.hasScannedFile(file)) return true;
       const real = resolveRealpath();
-      if (real && files.includes(real)) return true;
+      if (real && root.hasScannedFile(real)) return true;
     }
     for (const importer of mod.importers) queue.push(importer);
   }
