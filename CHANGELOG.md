@@ -23,6 +23,7 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 - The Vite plugin builds only the candidates found since the previous build of a stylesheet, keeps the scanned files in a set for HMR lookups, and lints only the files changed since the last diagnostics run.
 - `compileAsync` loads all the missing `@import`s of an attempt together instead of restarting once per import.
 - Adding a file to the scanner walks only the directories that lead to it instead of the whole source tree.
+- The language server recompiles only the projects whose stylesheets changed, recompiles a project whose memory has grown far beyond its initial size, and finds misspelling suggestions among classes of similar length only.
 
 ### Fixed
 

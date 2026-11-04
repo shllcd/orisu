@@ -36,6 +36,9 @@ pub struct Project {
     arena: Arena,
     variables: FxHashMap<String, String>,
     classes: OnceCell<Vec<ClassEntry>>,
+    /// Indices into `classes`, bucketed by name length.
+    by_length: OnceCell<Vec<Vec<u32>>>,
+    loaded_bytes: usize,
     variants: OnceCell<Vec<VariantItem>>,
     theme_colors: OnceCell<FxHashMap<String, Rgba>>,
     infos: RefCell<FxHashMap<String, Rc<ClassInfo>>>,
@@ -92,6 +95,7 @@ impl Project {
             state.compiler.design_system.attributify.map(|a| Attributify { prefix: a.prefix.to_owned(), prefixed_only: a.prefixed_only })
         });
         let Loaded { dependencies, variables } = std::mem::take(&mut *loaded.borrow_mut());
+        let loaded_bytes = arena.borrow_owner().allocated_bytes();
         Ok(Self {
             entry: entry.to_path_buf(),
             dir,
@@ -100,12 +104,19 @@ impl Project {
             arena,
             variables,
             classes: OnceCell::new(),
+            by_length: OnceCell::new(),
+            loaded_bytes,
             variants: OnceCell::new(),
             theme_colors: OnceCell::new(),
             infos: RefCell::default(),
             canonical: RefCell::default(),
             canonical_ready: Cell::new(false),
         })
+    }
+
+    /// Whether the arena, which only grows as classes are looked up, has outgrown the freshly loaded one enough to reload.
+    pub fn needs_reload(&self) -> bool {
+        self.arena.borrow_owner().allocated_bytes() > (self.loaded_bytes * 4).max(64 << 20)
     }
 
     fn with_ds<T>(&self, f: impl for<'a> FnOnce(&DesignSystem<'a>) -> T) -> T {
@@ -182,12 +193,26 @@ impl Project {
     /// The known class closest to `utility` within a few edits, for misspellings.
     pub fn suggestion(&self, utility: &str) -> Option<&str> {
         let limit = (utility.chars().count() / 4).clamp(1, 3);
-        self.classes()
-            .iter()
-            .filter(|entry| entry.name.len().abs_diff(utility.len()) <= limit)
-            .filter_map(|entry| Some((distance(utility, &entry.name, limit)?, entry.name.as_str())))
-            .min_by_key(|&(d, _)| d)
-            .map(|(_, name)| name)
+        let classes = self.classes();
+        let by_length = self.by_length.get_or_init(|| {
+            let mut by_length = vec![Vec::new(); classes.iter().map(|entry| entry.name.len() + 1).max().unwrap_or(0)];
+            for (i, entry) in classes.iter().enumerate() {
+                by_length[entry.name.len()].push(i as u32);
+            }
+            by_length
+        });
+        let lengths = utility.len().saturating_sub(limit)..(utility.len() + limit + 1).min(by_length.len());
+        by_length
+            .get(lengths)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|&i| {
+                let name = classes[i as usize].name.as_str();
+                Some((distance(utility, name, limit)?, i, name))
+            })
+            .min_by_key(|&(d, i, _)| (d, i))
+            .map(|(_, _, name)| name)
     }
 
     /// Whether `name` sits in a theme namespace, such as `--color-brnd`, yet neither the theme nor a stylesheet defines it.

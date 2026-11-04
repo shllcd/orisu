@@ -45,7 +45,7 @@ pub fn run() -> Result<()> {
     };
     conn.initialize_finish(id, serde_json::to_value(result)?)?;
     let mut server = Server::new(conn, &params, encoding);
-    server.reload();
+    server.reload(None);
     if params.capabilities.workspace.as_ref().and_then(|w| w.did_change_watched_files).is_some_and(|w| w.dynamic_registration == Some(true))
     {
         server.watch()?;
@@ -153,6 +153,9 @@ impl Server {
                 Message::Notification(notification) => self.on_notification(notification)?,
                 Message::Response(_) => {}
             }
+            if self.projects.iter().any(Project::needs_reload) {
+                self.reload(Some(&[]));
+            }
         }
     }
 
@@ -172,7 +175,8 @@ impl Server {
         Ok(())
     }
 
-    fn reload(&mut self) {
+    /// Recompiles every entry point, or with `changed` only those whose stylesheets it lists, besides new and outgrown ones.
+    fn reload(&mut self, changed: Option<&[PathBuf]>) {
         let failed: Vec<PathBuf> = self.failures.drain(..).map(|(path, _)| path).collect();
         self.stale.clear();
         let mut previous: Vec<Project> = std::mem::take(&mut self.projects);
@@ -184,6 +188,16 @@ impl Server {
             }
         };
         for entry in entries {
+            let kept = previous.iter().position(|p| {
+                p.entry == entry
+                    && !failed.contains(&entry)
+                    && !p.needs_reload()
+                    && changed.is_some_and(|changed| !changed.iter().any(|path| *path == p.entry || p.dependencies.contains(path)))
+            });
+            if let Some(at) = kept {
+                self.projects.push(previous.swap_remove(at));
+                continue;
+            }
             match Project::load(&entry) {
                 Ok(project) => self.projects.push(project),
                 Err(error) => {
@@ -322,21 +336,22 @@ impl Server {
             }
             DidSaveTextDocument::METHOD => {
                 let uri = parse::<DidSaveTextDocument>(notification)?.text_document.uri;
-                if !self.watching && uri_path(&uri).is_some_and(|path| self.affects(&path)) {
-                    self.reload();
+                if let Some(path) = uri_path(&uri).filter(|path| !self.watching && self.affects(path)) {
+                    self.reload(Some(&[path]));
                 }
             }
             DidChangeWatchedFiles::METHOD => {
                 let changes = parse::<DidChangeWatchedFiles>(notification)?.changes;
-                if changes.iter().filter_map(|change| uri_path(&change.uri)).any(|path| self.affects(&path)) {
-                    self.reload();
+                let paths: Vec<PathBuf> = changes.iter().filter_map(|change| uri_path(&change.uri)).collect();
+                if paths.iter().any(|path| self.affects(path)) {
+                    self.reload(Some(&paths));
                 }
             }
             DidChangeConfiguration::METHOD => {
                 let settings = parse::<DidChangeConfiguration>(notification)?.settings;
                 if !settings.is_null() {
                     self.settings = Settings::from_value(&settings);
-                    self.reload();
+                    self.reload(None);
                 }
             }
             _ => {}
