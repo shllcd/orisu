@@ -110,6 +110,34 @@ catalog! {
             good: "<a class=\"hover:underline\"></a>\n",
         },
     }
+    InvalidStylesheet {
+        name: "INVALID_STYLESHEET",
+        severity: Error,
+        title: "Stylesheet that does not compile",
+        message: "{message}",
+        explanation: "The stylesheet breaks a rule of Tailwind CSS, such as an `@utility` without properties, a `@custom-variant` with neither selector nor body, an `@apply` cycle or a `--theme(…)` call outside the theme, so it does not build. The message is the one Tailwind prints for the same stylesheet. `data.message` is the message.",
+        repair: "Fix the rule the message names. It says what is wrong and usually shows the expected form.",
+        fix: None,
+        example: Example {
+            lang: "css",
+            bad: "@utility tab-4 {}\n",
+            good: "@utility tab-4 {\n  tab-size: 4;\n}\n",
+        },
+    }
+    CircularImport {
+        name: "CIRCULAR_IMPORT",
+        severity: Error,
+        title: "Stylesheet that imports itself",
+        message: "`{file}` imports itself through {cycle}.",
+        explanation: "Each `@import` is inlined into the stylesheet that imports it, so a stylesheet reached again from its own imports would be inlined forever. `data.file` is the stylesheet and `data.cycle` the chain of imports that leads back to it, each in backticks.",
+        repair: "Remove one `@import` of the chain, usually the one that points back to a stylesheet higher up.",
+        fix: None,
+        example: Example {
+            lang: "css",
+            bad: "/* theme.css */\n@import \"./app.css\";\n",
+            good: "/* theme.css */\n@theme {\n  --color-brand: oklch(0.6 0.2 250);\n}\n",
+        },
+    }
     UnsupportedPlugin {
         name: "UNSUPPORTED_PLUGIN",
         severity: Error,

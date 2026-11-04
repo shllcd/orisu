@@ -73,6 +73,64 @@ After:
 <a class="hover:underline"></a>
 ```
 
+## INVALID_STYLESHEET
+
+**Stylesheet that does not compile** · severity `error`
+
+> {message}
+
+`data` keys: `message`
+
+Automatic fix: no
+
+The stylesheet breaks a rule of Tailwind CSS, such as an `@utility` without properties, a `@custom-variant` with neither selector nor body, an `@apply` cycle or a `--theme(…)` call outside the theme, so it does not build. The message is the one Tailwind prints for the same stylesheet. `data.message` is the message.
+
+**Repair:** Fix the rule the message names. It says what is wrong and usually shows the expected form.
+
+Before:
+
+```css
+@utility tab-4 {}
+```
+
+After:
+
+```css
+@utility tab-4 {
+  tab-size: 4;
+}
+```
+
+## CIRCULAR_IMPORT
+
+**Stylesheet that imports itself** · severity `error`
+
+> `{file}` imports itself through {cycle}.
+
+`data` keys: `cycle`, `file`
+
+Automatic fix: no
+
+Each `@import` is inlined into the stylesheet that imports it, so a stylesheet reached again from its own imports would be inlined forever. `data.file` is the stylesheet and `data.cycle` the chain of imports that leads back to it, each in backticks.
+
+**Repair:** Remove one `@import` of the chain, usually the one that points back to a stylesheet higher up.
+
+Before:
+
+```css
+/* theme.css */
+@import "./app.css";
+```
+
+After:
+
+```css
+/* theme.css */
+@theme {
+  --color-brand: oklch(0.6 0.2 250);
+}
+```
+
 ## UNSUPPORTED_PLUGIN
 
 **JavaScript plugin or config** · severity `error`

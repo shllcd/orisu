@@ -18,7 +18,7 @@ pub fn run() -> Result<(), String> {
 /// Lints `files` against the project compiled from `entry` with the default settings, plus unknown variants and misspelled
 /// utilities; with `fix`, rewrites each file with its fixes.
 pub fn check(entry: &std::path::Path, files: &[std::path::PathBuf], fix: bool) -> Result<Vec<orisu_diagnostics::Diagnostic>, String> {
-    let project = project::Project::load(entry)?;
+    let project = project::Project::load(entry).map_err(|error| error.message)?;
     let mut settings = settings::Settings::default();
     settings.lint.unknown_classes = settings::Level::Error;
     let mut out = Vec::new();

@@ -4,7 +4,7 @@ use orisu_allocator::Allocator;
 use orisu_ast::{Node, to_css};
 use orisu_canonical::{CanonicalizeOptions, Canonicalizer};
 use orisu_compat_tailwind::Tailwind;
-use orisu_compiler::compiler::{self, Compiler, Options, Stylesheet};
+use orisu_compiler::compiler::{self, CompileError, Compiler, Options, Stylesheet};
 use orisu_compiler::design_system::{Caches, DesignSystem, Session};
 use orisu_compiler::intellisense::{self, ClassEntry};
 use orisu_scanner::attributify::Attributify;
@@ -66,7 +66,7 @@ struct Loaded {
 }
 
 impl Project {
-    pub fn load(entry: &Path) -> Result<Self, String> {
+    pub fn load(entry: &Path) -> Result<Self, CompileError> {
         let css = std::fs::read_to_string(entry).map_err(|e| format!("Could not read `{}`: {e}", entry.display()))?;
         let dir = entry.parent().unwrap_or(Path::new("/")).to_path_buf();
         let loaded = Rc::new(RefCell::new(Loaded::default()));

@@ -13,6 +13,7 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 - The Vite plugin's `mangle` option renames classes to short names in builds: in the stylesheet, in the class positions of the project's scripts (`class`/`className` and `*ClassName` attributes, `cn`, `clsx`, `cx`, `classnames`, `twMerge`, `twJoin`, `cva`, `classList`, `setAttribute("class", …)`) and in the `orisu/cn` merge table, so `cn` keeps merging them. A class used anywhere else (another stylesheet, HTML, Markdown, a string outside a class position, dynamic parts like `` `text-${size}` ``) keeps its name, and so do the classes in `mangle.keep` and in `@source inline(…)`. On the shadcn/ui docs the minified stylesheet drops from 435.2 KB / 63.4 KB gzip to 372.7 KB / 57.8 KB. An SSR build in another process reads the plan the client build saves in the Vite cache directory. `mangle` is off with attributify and supports one utility stylesheet per build.
 - `MANGLE_UNTRACKED_CLASS`, `MANGLE_NAME_MERGER` and `MANGLE_CLASS_COLLISION` fail a `mangle` build when a bundled module uses a renamed class where it cannot be renamed, imports `tailwind-merge` or `tailwind-variants`, or a stylesheet outside the build uses a renamed class or a short name.
+- Compile errors carry a diagnostic code: `error.code` in JavaScript and the diagnostic code in the language server. `INVALID_STYLESHEET` covers the errors Tailwind reports, and `CIRCULAR_IMPORT` a stylesheet that imports itself, naming the chain of imports.
 
 ### Changed
 
@@ -22,6 +23,7 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 - The scanner no longer turns invalid UTF-8 into strings without checking it.
 - The scanner cache is invalidated when the scanner's code changes, not only on a new version, and concurrent writers no longer share a temporary file.
+- A stylesheet that imports itself fails with `CIRCULAR_IMPORT` instead of hitting the depth limit, and the depth limit message no longer has a stray `)`.
 
 ## [0.3.0] - 2026-10-31
 

@@ -244,8 +244,9 @@ pub fn expand_variant_groups(code: String) -> Option<String> {
 
 type LoadFn<'f> = Function<'f, FnArgs<(String, String)>, LoadedStylesheet>;
 
+/// Throws errors whose `code` is a diagnostic code such as `INVALID_STYLESHEET`.
 #[napi]
-pub fn compile(css: String, options: Option<CompileOptions>, load_stylesheet: Option<LoadFn<'_>>) -> Result<Compiler> {
+pub fn compile(css: String, options: Option<CompileOptions>, load_stylesheet: Option<LoadFn<'_>>) -> Result<Compiler, &'static str> {
     let alloc = Box::into_raw(Box::new(Allocator::new()));
     // SAFETY: the arena lives until `Compiler::drop`, which drops the borrowing compiler first.
     let arena: &'static Allocator = unsafe { &*alloc };
@@ -268,7 +269,7 @@ pub fn compile(css: String, options: Option<CompileOptions>, load_stylesheet: Op
         Err(err) => {
             // SAFETY: nothing borrows the arena once compilation failed.
             unsafe { drop(Box::from_raw(alloc)) };
-            Err(Error::from_reason(err))
+            Err(Error::new(err.code.name(), err.message))
         }
     }
 }

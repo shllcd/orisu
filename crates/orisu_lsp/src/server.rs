@@ -15,10 +15,11 @@ use lsp_types::request::{
 use lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, ColorProviderCapability, CompletionOptions, Diagnostic,
     DiagnosticSeverity, DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, HoverProviderCapability,
-    InitializeParams, InitializeResult, Position, PositionEncodingKind, PublishDiagnosticsParams, Range, Registration, RegistrationParams,
-    SaveOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Uri,
+    InitializeParams, InitializeResult, NumberOrString, Position, PositionEncodingKind, PublishDiagnosticsParams, Range, Registration,
+    RegistrationParams, SaveOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
+use orisu_compiler::compiler::CompileError;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use std::error::Error;
@@ -86,7 +87,7 @@ struct Server {
     settings: Settings,
     projects: Vec<Project>,
     /// Entry points that failed to compile, with the error.
-    failures: Vec<(PathBuf, String)>,
+    failures: Vec<(PathBuf, CompileError)>,
     documents: FxHashMap<Uri, Document>,
     watching: bool,
     item_defaults: bool,
@@ -205,8 +206,9 @@ impl Server {
             let diagnostic = Diagnostic {
                 range: Range::new(Position::new(0, 0), Position::new(0, 0)),
                 severity: Some(DiagnosticSeverity::ERROR),
+                code: Some(NumberOrString::String(error.code.name().to_owned())),
                 source: Some(SOURCE.to_owned()),
-                message: error.clone(),
+                message: error.message.clone(),
                 ..Diagnostic::default()
             };
             self.publish_raw(path_uri(path), vec![diagnostic], None);

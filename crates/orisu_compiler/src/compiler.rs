@@ -99,7 +99,34 @@ pub struct Compiler<'a> {
     delivered: Option<u32>,
 }
 
-pub fn compile<'a>(css: &'a str, alloc: &'a Allocator, mut options: Options<'_, 'a>) -> Result<Compiler<'a>, String> {
+/// A stylesheet that does not compile. `message` is Tailwind's for the stylesheets Tailwind rejects too.
+#[derive(Debug, Clone)]
+pub struct CompileError {
+    pub code: Code,
+    pub message: String,
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CompileError {}
+
+impl From<String> for CompileError {
+    fn from(message: String) -> Self {
+        Self { code: Code::InvalidStylesheet, message }
+    }
+}
+
+impl From<Report> for CompileError {
+    fn from(report: Report) -> Self {
+        Self { code: report.code(), message: report.message() }
+    }
+}
+
+pub fn compile<'a>(css: &'a str, alloc: &'a Allocator, mut options: Options<'_, 'a>) -> Result<Compiler<'a>, CompileError> {
     let ast = css_parser::parse(css, alloc).map_err(|e| e.to_string())?;
     let parsed = parse_css(ast, alloc, &mut options)?;
     let Parsed { design_system, caches, mut ast, sources, root, mut utilities_path, features, inline_candidates } = parsed;
@@ -353,11 +380,12 @@ fn theme_snippet(name: &str, params: &str, child: &Node<'_>, alloc: &Allocator) 
         .join("\n")
 }
 
-fn parse_css<'a>(ast: Nodes<'a>, alloc: &'a Allocator, options: &mut Options<'_, 'a>) -> Result<Parsed<'a>, String> {
+fn parse_css<'a>(ast: Nodes<'a>, alloc: &'a Allocator, options: &mut Options<'_, 'a>) -> Result<Parsed<'a>, CompileError> {
     let base = alloc.str(options.base);
     let mut ast = Vec::from_iter_in([Node::Context { ctx: Ctx { base: Some(base), ..Ctx::default() }, nodes: ast }], alloc);
     let extension = options.extension;
-    let mut features = substitute_at_imports(&mut ast, base, &mut options.load_stylesheet, extension, 0, alloc)?;
+    let imports = Imports { load: &mut options.load_stylesheet, extension, alloc };
+    let mut features = substitute_at_imports(&mut ast, base, imports, &mut std::vec::Vec::new())?;
 
     let mut important = false;
     let mut attributify = None;
@@ -690,7 +718,7 @@ fn parse_css<'a>(ast: Nodes<'a>, alloc: &'a Allocator, options: &mut Options<'_,
         cycle.get_or_insert_with(|| circular_variants_error(path, start, alloc));
     });
     if let Some(err) = cycle {
-        return Err(err);
+        return Err(err.into());
     }
     for name in order {
         match custom_variants.swap_remove(name) {
@@ -799,7 +827,7 @@ fn with_body<'a, R>(
     result
 }
 
-fn reject_modules(ast: &Nodes<'_>) -> Result<(), String> {
+fn reject_modules(ast: &Nodes<'_>) -> Result<(), Report> {
     let mut found = None;
     walk(ast, &mut |node| {
         if let Node::AtRule { name: name @ ("@plugin" | "@config"), params, .. } = node
@@ -817,7 +845,7 @@ fn reject_modules(ast: &Nodes<'_>) -> Result<(), String> {
         "@tailwindcss/forms" => " Import `orisu/presets/tailwind-forms.css` instead.",
         _ => "",
     };
-    Err(Report::new(Code::UnsupportedPlugin, Span::new(0, 0)).arg("directive", directive).arg("id", id).arg("hint", hint).message())
+    Err(Report::new(Code::UnsupportedPlugin, Span::new(0, 0)).arg("directive", directive).arg("id", id).arg("hint", hint))
 }
 
 fn circular_variants_error(path: &[&str], start: &str, alloc: &Allocator) -> String {
@@ -838,16 +866,22 @@ fn circular_variants_error(path: &[&str], start: &str, alloc: &Allocator) -> Str
     format!("Circular dependency detected in custom variants:\n\n{output}")
 }
 
+struct Imports<'l, 'o, 'a> {
+    load: &'l mut Option<Box<LoadStylesheet<'o>>>,
+    extension: Option<ExtensionRef<'a>>,
+    alloc: &'a Allocator,
+}
+
+/// Inlines the `@import`s of `ast`; `chain` holds the stylesheets being imported, outermost first.
 fn substitute_at_imports<'a>(
     ast: &mut Nodes<'a>,
     base: &'a str,
-    load: &mut Option<Box<LoadStylesheet<'_>>>,
-    extension: Option<ExtensionRef<'a>>,
-    depth: usize,
-    alloc: &'a Allocator,
-) -> Result<u8, String> {
+    imports: Imports<'_, '_, 'a>,
+    chain: &mut std::vec::Vec<String>,
+) -> Result<u8, CompileError> {
+    let alloc = imports.alloc;
     let mut features = features::NONE;
-    walk_scoped(ast, Scope::default(), &mut |node, _| {
+    walk_scoped(ast, Scope::default(), &mut |node, _| -> Result<Walk<'a>, CompileError> {
         let Node::AtRule { name: name @ ("@import" | "@reference"), params, .. } = node else {
             return Ok(Walk::Continue);
         };
@@ -862,19 +896,27 @@ fn substitute_at_imports<'a>(
         if uri.starts_with("data:") || uri.starts_with("http://") || uri.starts_with("https://") {
             return Ok(Walk::Continue);
         }
-        if depth > 100 {
-            return Err(format!("Exceeded maximum recursion depth while resolving `{uri}` in `{base}`)"));
+        if chain.len() > 100 {
+            return Err(format!("Exceeded maximum recursion depth while resolving `{uri}` in `{base}`").into());
         }
-        let (content, loaded_base) = match (extension.and_then(|e| e.stylesheet(uri)), load.as_mut()) {
-            (Some(content), _) => (content, base),
+        let (content, loaded_base, path) = match (imports.extension.and_then(|e| e.stylesheet(uri)), imports.load.as_mut()) {
+            (Some(content), _) => (content, base, uri.to_owned()),
             (None, Some(loader)) => {
                 let loaded = loader(uri, base)?;
-                (alloc.str(&loaded.content), alloc.str(&loaded.base))
+                (alloc.str(&loaded.content), alloc.str(&loaded.base), loaded.path)
             }
-            (None, None) => return Err("No `loadStylesheet` function provided to `compile`".to_owned()),
+            (None, None) => return Err("No `loadStylesheet` function provided to `compile`".to_owned().into()),
         };
+        if let Some(at) = chain.iter().position(|outer| *outer == path) {
+            let cycle = chain[at..].iter().chain([&path]).map(|path| format!("`{path}`")).collect::<std::vec::Vec<_>>().join(" → ");
+            return Err(Report::new(Code::CircularImport, Span::new(0, 0)).arg("file", path).arg("cycle", cycle).into());
+        }
         let mut imported = css_parser::parse(content, alloc).map_err(|e| e.to_string())?;
-        features |= substitute_at_imports(&mut imported, loaded_base, load, extension, depth + 1, alloc)?;
+        chain.push(path);
+        let nested = Imports { load: &mut *imports.load, ..imports };
+        let result = substitute_at_imports(&mut imported, loaded_base, nested, chain);
+        chain.pop();
+        features |= result?;
         let ctx = Ctx { base: Some(loaded_base), ..Ctx::default() };
         let mut root = Vec::from_iter_in([Node::Context { ctx, nodes: imported }], alloc);
         if let Some(layer) = import.layer {
