@@ -1,13 +1,26 @@
 // Portions ported from @tailwindcss/vite (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Environment, EnvironmentModuleNode, InternalResolveOptions, Plugin, ResolvedConfig, ViteDevServer } from "vite";
-import { check, compile, expandVariantGroups, Features, normalizePath, optimize, Scanner, type Compiler } from "./index.ts";
+import {
+  check,
+  compile,
+  expandVariantGroups,
+  Features,
+  loadManglePlan,
+  mangleModule,
+  normalizePath,
+  optimize,
+  Scanner,
+  type Compiler,
+  type MangledModule,
+  type ManglePlan,
+} from "./index.ts";
 import { encodeMergeTable } from "./table.ts";
 
 const SPECIAL_QUERY_RE = /[?&](?:worker|sharedworker|raw|url)\b/;
@@ -22,6 +35,9 @@ const PACKAGE_DIR = normalizePath(fileURLToPath(new URL("../", import.meta.url))
 const ROOT_WAIT_MS = 2000;
 const DIAGNOSTICS_DEBOUNCE_MS = 100;
 const SOURCE_FILE_RE = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|mdx)(?:$|\?)/;
+const SCRIPT_FILE_RE = /\.[cm]?[jt]sx?$/;
+const PLACEHOLDER_RE = /__orisu-((?:[0-9a-f]{2})+)__/g;
+const MANGLE_PLAN_FILE = "mangle.json";
 
 export type PluginOptions = {
   /** Optimize and minify the output CSS. */
@@ -32,6 +48,22 @@ export type PluginOptions = {
     /** Writes every class diagnostic of the scanned sources as JSON lines to this file, relative to the Vite root. */
     jsonl?: string;
   };
+  /**
+   * Renames classes to short names in builds: in the stylesheet, in the class positions of the project's scripts
+   * (`className`, `cn`, `clsx`, `cva`…) and in the `cn` merge table. A class used anywhere else keeps its name.
+   */
+  mangle?: boolean | MangleOptions;
+};
+
+export type MangleOptions = {
+  /** Classes that keep their names; a regular expression keeps every candidate it matches. */
+  keep?: (string | RegExp)[];
+  /** Starts every short name, so they cannot equal classes of other stylesheets on the page. */
+  prefix?: string;
+  /** Functions whose arguments are class lists, besides `cn`, `clsx`, `cx`, `classnames`, `twMerge` and `twJoin`. */
+  classFunctions?: string[];
+  /** Attributes and properties whose values are class lists, besides `class`, `className` and `*ClassName`. */
+  classAttributes?: string[];
 };
 
 type ResolveFn = (id: string, base: string) => Promise<string | false | undefined>;
@@ -97,6 +129,11 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
   let onFirstRoot: (() => void) | undefined;
   const firstRoot = new Promise<void>((resolve) => (onFirstRoot = resolve));
   let diagnosticsTimer: ReturnType<typeof setTimeout> | undefined;
+  const mangleOptions = opts.mangle ? (opts.mangle === true ? {} : opts.mangle) : null;
+  const plans = new Map<string, ManglePlan | null>();
+  let savedPlan: ManglePlan | null | undefined;
+  const mangledModules = new Map<string, MangledModule>();
+  const foreignStylesheets = new Map<string, string>();
 
   function findRoot(envName: string): Root | undefined {
     for (const name of [envName, "client", ...rootsByEnv.keys()]) {
@@ -106,9 +143,71 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
   }
 
   function mergeTable(envName: string): string {
+    const plan = mangleOptions && config!.command === "build" ? planFor(envName) : null;
+    if (plan) return JSON.stringify(encodeMergeTable(plan.mergeTable()));
     const root = findRoot(envName);
     if (!root) return JSON.stringify(encodeMergeTable({ prefix: null, keys: [], values: [], erases: [] }));
     return JSON.stringify(encodeMergeTable(root.compiler!.mergeTable(root.allCandidates)));
+  }
+
+  function planPath(): string {
+    return path.join(config!.cacheDir, "orisu", MANGLE_PLAN_FILE);
+  }
+
+  /** The plan of the stylesheet built in this process, or the one an earlier build of the app saved. */
+  function planFor(envName: string): ManglePlan | null {
+    const root = findRoot(envName);
+    const plan = root ? plans.get(root.inputPath) : plans.values().next().value;
+    if (plan !== undefined) return plan;
+    if (savedPlan === undefined) {
+      try {
+        savedPlan = loadManglePlan(readFileSync(planPath(), "utf8"));
+      } catch {
+        savedPlan = null;
+      }
+    }
+    return savedPlan;
+  }
+
+  async function mangleStylesheet(root: Root, css: string, env: Environment | undefined): Promise<string> {
+    let plan = plans.get(root.inputPath);
+    if (plan === undefined) {
+      const other = [...plans.keys()][0];
+      if (other !== undefined) {
+        throw new Error(`[orisu] \`mangle\` renames one stylesheet per build, but both ${other} and ${root.inputPath} use utilities.`);
+      }
+      const compiler = root.compiler!;
+      if (compiler.attributify) {
+        config!.logger.warn("[orisu] `mangle` is off: attributify classes are attribute names, which it cannot follow.");
+        plan = null;
+      } else {
+        const keep = mangleOptions!.keep ?? [];
+        const patterns = keep.filter((entry) => entry instanceof RegExp);
+        const kept = keep.filter((entry) => typeof entry === "string");
+        const candidates = root.allCandidates;
+        for (const candidate of candidates) if (patterns.some((pattern) => candidate.search(pattern) !== -1)) kept.push(candidate);
+        const outDir = path.resolve(config!.root, (env?.config ?? config!).build.outDir);
+        const outDirs = [outDir, path.join(realpathSync(config!.root), path.relative(config!.root, outDir))].map((dir) => dir + path.sep);
+        const files = root.scannedFiles.filter((file) => !outDirs.some((dir) => file.startsWith(dir)));
+        plan = compiler.mangle(
+          { files, entry: root.inputPath, candidates, css },
+          { ...nativeMangleOptions(), keep: kept },
+        );
+        await fs.mkdir(path.dirname(planPath()), { recursive: true });
+        await fs.writeFile(planPath(), plan.toJson());
+      }
+      plans.set(root.inputPath, plan);
+    }
+    return plan ? plan.renameCss(css) : css;
+  }
+
+  function nativeMangleOptions() {
+    return {
+      prefix: mangleOptions!.prefix,
+      classFunctions: mangleOptions!.classFunctions,
+      classAttributes: mangleOptions!.classAttributes,
+      variantGroups: opts.variantGroups === true,
+    };
   }
 
   async function generate(this: { environment: Environment; addWatchFile(file: string): void }, src: string, id: string) {
@@ -123,8 +222,10 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
     const result = await root.generate(src, (file) => this.addWatchFile(file));
     if (!result) {
       roots.delete(id);
+      if (mangleOptions && config!.command === "build" && !/\.module\.css(?:$|\?)/.test(id)) foreignStylesheets.set(id, src);
       return;
     }
+    if (mangleOptions && config!.command === "build") result.code = await mangleStylesheet(root, result.code, env);
     onFirstRoot?.();
     onFirstRoot = undefined;
     scheduleDiagnostics();
@@ -199,6 +300,44 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
           const expanded = expandVariantGroups(code);
           if (expanded !== null) return { code: expanded, map: null };
         },
+      },
+    },
+
+    {
+      name: "orisu:mangle",
+      enforce: "pre",
+      apply: (_, env) => mangleOptions !== null && env.command === "build",
+      transform: {
+        filter: { id: { include: [SCRIPT_FILE_RE], exclude: [/\/node_modules\//] } },
+        handler(code, id) {
+          const mangled = mangleModule(code, idToPath(id), nativeMangleOptions());
+          mangledModules.set(id, mangled);
+          if (mangled.code !== null) return { code: mangled.code, map: mangled.map };
+        },
+      },
+
+      renderChunk(code, chunk) {
+        const plan = planFor(this.environment.name);
+        if (plan) {
+          for (const id of Object.keys(chunk.modules)) {
+            const mangled = mangledModules.get(id);
+            const error = mangled && plan.checkModule(path.relative(config!.root, idToPath(id)), mangled);
+            if (error) this.error(error);
+          }
+        }
+        if (!code.includes("__orisu-")) return;
+        if (!plan) return { code: code.replace(PLACEHOLDER_RE, (_, hex: string) => Buffer.from(hex, "hex").toString("utf8")), map: null };
+        const filled = plan.fill(code, chunk.fileName);
+        if (filled) return { code: filled.code, map: filled.map };
+      },
+
+      generateBundle() {
+        const plan = planFor(this.environment.name);
+        if (!plan) return;
+        for (const [id, css] of foreignStylesheets) {
+          const error = plan.checkCss(path.relative(config!.root, idToPath(id)), css);
+          if (error) this.error(error);
+        }
       },
     },
 

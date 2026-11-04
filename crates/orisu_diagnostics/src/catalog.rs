@@ -124,6 +124,48 @@ catalog! {
             good: "@import \"tailwindcss\";\n@import \"orisu/presets/tailwind-typography.css\";\n",
         },
     }
+    MangleUntrackedClass {
+        name: "MANGLE_UNTRACKED_CLASS",
+        severity: Error,
+        title: "Renamed class used where it cannot be renamed",
+        message: "`mangle` renames `{class}`, but `{file}` uses it where orisu cannot rewrite it, so that use would lose its styles.",
+        explanation: "`mangle` rewrites a class only where it is written whole in a class position: a `class` or `className` attribute, `cn`, `clsx`, `cva` and the like. A class in another string, or one built from pieces such as `\"text-\" + size`, keeps its name, so the stylesheet must keep it too. The scanned sources are checked before the build; this module was not, or changed since. `data.class` is the class and `data.file` the module.",
+        repair: "Write the whole class in a class position, or list it in `mangle.keep`.",
+        fix: None,
+        example: Example {
+            lang: "tsx",
+            bad: "<div className={\"text-\" + size} />\n",
+            good: "<div className={size === \"lg\" ? \"text-lg\" : \"text-sm\"} />\n",
+        },
+    }
+    MangleNameMerger {
+        name: "MANGLE_NAME_MERGER",
+        severity: Error,
+        title: "Class merging by name with `mangle`",
+        message: "`{file}` imports `{module}`, which merges classes by their names, and `mangle` renames them.",
+        explanation: "`tailwind-merge` and `tailwind-variants` decide which classes conflict by reading their names. Renamed classes no longer say what they set, so these libraries would keep conflicting classes. `cn` from `orisu/cn` merges by the generated CSS and knows the new names. `data.file` is the module and `data.module` the import.",
+        repair: "Merge with `cn` from `orisu/cn`, or turn `mangle` off.",
+        fix: None,
+        example: Example {
+            lang: "ts",
+            bad: "import { twMerge } from \"tailwind-merge\";\n",
+            good: "import { cn } from \"orisu/cn\";\n",
+        },
+    }
+    MangleClassCollision {
+        name: "MANGLE_CLASS_COLLISION",
+        severity: Error,
+        title: "Stylesheet class that `mangle` renames or reuses",
+        message: "`{file}` styles `.{class}`, which `mangle` {reason}.",
+        explanation: "A stylesheet outside the orisu build keeps its class names. When `mangle` renames the same class, that stylesheet stops matching the renamed elements; when a short name equals the class, the stylesheet starts matching unrelated elements. `data.file` is the stylesheet, `data.class` the class and `data.reason` says which case it is.",
+        repair: "List the class in `mangle.keep`, or set `mangle.prefix` so that short names cannot equal it.",
+        fix: None,
+        example: Example {
+            lang: "css",
+            bad: ".a { color: red; }\n",
+            good: ".legacy-a { color: red; }\n",
+        },
+    }
     ConflictingClasses {
         name: "CONFLICTING_CLASSES",
         severity: Warn,

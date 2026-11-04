@@ -311,6 +311,13 @@ impl<'s, 'a> Merger<'s, 'a> {
         id
     }
 
+    /// The variants `class` merges within, written as the JS `cn` runtime keys them, and its shape.
+    pub fn class_shape(&mut self, class: &str) -> (String, Option<u32>) {
+        let (key, important, base) = split_class(class, self.ds.theme.prefix());
+        let group = if important { format!("!{key}") } else { key };
+        (group, self.shape(base))
+    }
+
     pub fn merge<'c>(&mut self, classes: impl IntoIterator<Item = &'c str>) -> String {
         let classes: Vec<&str> = classes.into_iter().flat_map(str::split_ascii_whitespace).collect();
         let mut later: FxHashMap<(String, bool), Vec<u32>> = FxHashMap::default();

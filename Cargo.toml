@@ -24,6 +24,8 @@ orisu_ignore = { path = "crates/orisu_ignore" }
 orisu_diagnostics = { path = "crates/orisu_diagnostics" }
 orisu_compat_tailwind = { path = "crates/orisu_compat_tailwind" }
 orisu_lsp = { path = "crates/orisu_lsp" }
+orisu_analyze = { path = "crates/orisu_analyze" }
+orisu_mangle = { path = "crates/orisu_mangle" }
 bumpalo = { version = "3.20", features = ["collections"] }
 indexmap = "2"
 rustc-hash = "2"

@@ -6,7 +6,21 @@ import { pathToFileURL } from "node:url";
 import * as native from "./native.ts";
 import { rewriteUrls } from "./urls.ts";
 
-export { check, expandVariantGroups, Features, lsp, Polyfills, Scanner, type Compiler, type Diagnostic, type DiagnosticCode } from "./native.ts";
+export {
+  check,
+  expandVariantGroups,
+  Features,
+  loadManglePlan,
+  lsp,
+  mangleModule,
+  Polyfills,
+  Scanner,
+  type Compiler,
+  type Diagnostic,
+  type DiagnosticCode,
+  type MangledModule,
+  type ManglePlan,
+} from "./native.ts";
 export { normalizePath } from "./urls.ts";
 
 export type Resolver = (id: string, base: string) => Promise<string | false | undefined>;

@@ -16,6 +16,7 @@ use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use utf16::IndexConverter;
 
+mod mangle;
 mod utf16;
 
 #[derive(Debug, Clone)]
@@ -212,6 +213,7 @@ pub struct MergeTable {
     pub keys: Vec<String>,
     pub values: Vec<u32>,
     pub erases: Vec<Vec<u32>>,
+    pub names: Option<mangle::NameTable>,
 }
 
 /// Owns the arena that the inner compiler borrows from.
@@ -419,7 +421,7 @@ impl Compiler {
     pub fn merge_table(&mut self, classes: Vec<String>) -> MergeTable {
         let table = Merger::new(self.inner.session()).table(classes.iter().map(String::as_str));
         let (keys, values) = table.entries.into_iter().unzip();
-        MergeTable { prefix: self.inner.design_system.theme.prefix().map(str::to_owned), keys, values, erases: table.erases }
+        MergeTable { prefix: self.inner.design_system.theme.prefix().map(str::to_owned), keys, values, erases: table.erases, names: None }
     }
 }
 

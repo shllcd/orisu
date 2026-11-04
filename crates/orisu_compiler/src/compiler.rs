@@ -77,6 +77,8 @@ pub struct Compiler<'a> {
     pub sources: std::vec::Vec<Source<'a>>,
     pub root: Option<SourceRoot<'a>>,
     pub features: u8,
+    /// Candidates from `@source inline(…)`, which the stylesheet asks for by name.
+    pub inline_candidates: std::vec::Vec<&'a str>,
     alloc: &'a Allocator,
     input: &'a str,
     ast: Nodes<'a>,
@@ -110,7 +112,7 @@ pub fn compile<'a>(css: &'a str, alloc: &'a Allocator, mut options: Options<'_, 
     let splice_context = utilities_path.as_deref().and_then(|path| splice_context(&ast, path));
     let mut valid_candidates = IndexSet::default();
     let mut default_did_change = false;
-    for candidate in inline_candidates {
+    for &candidate in &inline_candidates {
         if !design_system.invalid_candidates.contains(candidate) {
             valid_candidates.insert(candidate);
             default_did_change = true;
@@ -122,6 +124,7 @@ pub fn compile<'a>(css: &'a str, alloc: &'a Allocator, mut options: Options<'_, 
         sources,
         root,
         features,
+        inline_candidates,
         alloc,
         input: css,
         ast,

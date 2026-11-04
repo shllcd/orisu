@@ -11,17 +11,21 @@ crate-type = ["cdylib"]
 
 [dependencies]
 orisu_allocator.workspace = true
+orisu_analyze.workspace = true
 orisu_candidate.workspace = true
 orisu_canonical.workspace = true
 orisu_compat_tailwind.workspace = true
 orisu_compiler.workspace = true
 orisu_lsp.workspace = true
+orisu_mangle.workspace = true
 orisu_merge.workspace = true
 orisu_registry.workspace = true
 orisu_scanner.workspace = true
 napi = { version = "3.13", default-features = false, features = ["napi4", "dyn-symbols"] }
 napi-derive = "3.6"
 serde_json.workspace = true
+indexmap.workspace = true
+rustc-hash.workspace = true
 
 [build-dependencies]
 napi-build = "2.5"

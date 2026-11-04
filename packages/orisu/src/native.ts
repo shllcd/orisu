@@ -61,11 +61,74 @@ export interface ThemeEntry {
   options: number;
 }
 
+/** Short names of renamed classes that `cn` merges, rebuilt in the order the compiler gave them. */
+export interface NameTable {
+  prefix: string;
+  /** Variant groups shared with classes that keep their names; group `i` has id `i + 1`. */
+  groups: string[];
+  /** How many group ids after the shared ones only renamed classes use. */
+  opaque: number;
+  runs: { group: number; shapes: number[] }[];
+  /** Name indices skipped because the name is taken. */
+  holes: number[];
+}
+
 export interface MergeTable {
   prefix: string | null;
   keys: string[];
   values: number[];
   erases: number[][];
+  names?: NameTable | null;
+}
+
+export interface MangleOptions {
+  /** Starts every short name. */
+  prefix?: string;
+  /** Classes that keep their names. */
+  keep?: string[];
+  /** Functions whose arguments are class lists, besides `cn`, `clsx` and the like. */
+  classFunctions?: string[];
+  /** Attributes and properties whose values are class lists, besides `class` and `className`. */
+  classAttributes?: string[];
+  variantGroups?: boolean;
+}
+
+export interface MangleInput {
+  /** Every scanned file. */
+  files: string[];
+  /** The stylesheet that is renamed. */
+  entry: string;
+  candidates: string[];
+  /** The stylesheet built from `candidates`. */
+  css: string;
+}
+
+export interface ClassFragment {
+  kind: "prefix" | "suffix" | "infix";
+  text: string;
+}
+
+export interface MangledModule {
+  /** The module with placeholders in its class positions, `null` when it has none. */
+  code: string | null;
+  map: string | null;
+  /** Classes the module uses where they cannot be renamed. */
+  pinned: string[];
+  fragments: ClassFragment[];
+  /** The import of a library that merges classes by name. */
+  nameMerger: string | null;
+}
+
+export interface ManglePlan {
+  renameCss(css: string): string;
+  /** Resolves the placeholders of `code`; `null` when it has none. */
+  fill(code: string, name: string): { code: string; map: string } | null;
+  checkModule(file: string, module: MangledModule): string | null;
+  checkCss(file: string, css: string): string | null;
+  /** `[class, short name]` pairs. */
+  readonly names: [string, string][];
+  mergeTable(): MergeTable;
+  toJson(): string;
 }
 
 export interface DiagnosticEdit {
@@ -128,6 +191,7 @@ export interface Compiler {
   variantNames(): string[];
   merge(classes: string[]): string;
   mergeTable(classes: string[]): MergeTable;
+  mangle(input: MangleInput, options?: MangleOptions | null): ManglePlan;
 }
 
 export interface NativeCompileOptions {
@@ -147,6 +211,8 @@ interface Binding {
     loadStylesheet?: (id: string, base: string) => LoadedStylesheet,
   ): NativeCompiler;
   expandVariantGroups(code: string): string | null;
+  mangleModule(code: string, path: string, options?: MangleOptions | null): MangledModule;
+  ManglePlan: { fromJson(json: string): ManglePlan };
   check(entry: string, files: string[], fix?: boolean): string;
   lsp(): void;
 }
@@ -217,6 +283,10 @@ export const check = (entry: string, files: string[], fix = false): Diagnostic[]
 export const lsp = binding.lsp;
 /** Expands `hover:(a b)` variant groups inside the string literals of `code`; `null` when none were found. */
 export const expandVariantGroups = binding.expandVariantGroups;
+/** Rewrites the class positions of a module into placeholders that {@link ManglePlan.fill} resolves. */
+export const mangleModule = binding.mangleModule;
+/** Reads a plan written by {@link ManglePlan.toJson}. */
+export const loadManglePlan = (json: string): ManglePlan => binding.ManglePlan.fromJson(json);
 /** Compiles synchronously; `@import` needs {@link compileAsync}. */
 export const compile = (css: string, options?: NativeCompileOptions): Compiler => cachingBuild(binding.compile(css, options));
 

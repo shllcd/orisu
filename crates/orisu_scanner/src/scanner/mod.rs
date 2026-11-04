@@ -469,21 +469,7 @@ fn extract_files(files: Vec<ContentFile>, attributify: Option<&Attributify>) -> 
                 return (set, seen);
             };
             let blob = expand_variant_groups(pre_process_input(content, &extension));
-            for line in blob.split(|x| *x == b'\n').filter(|line| !line.is_empty()) {
-                if seen.contains(line) {
-                    continue;
-                }
-                seen.insert(line.into());
-                for extracted in Extractor::new(line).extract() {
-                    let (Extracted::Candidate(bytes) | Extracted::CssVariable(bytes)) = extracted;
-                    let Ok(candidate) = std::str::from_utf8(bytes) else {
-                        continue;
-                    };
-                    if !set.contains(candidate) {
-                        set.insert(candidate.to_owned());
-                    }
-                }
-            }
+            extract_lines(&blob, &mut set, &mut seen);
             if let Some(attributify) = attributify {
                 attributify.extract(&blob, &mut set);
             }
@@ -497,6 +483,32 @@ fn extract_files(files: Vec<ContentFile>, attributify: Option<&Attributify>) -> 
             a.extend(b);
             a
         })
+}
+
+/// The candidates the scanner finds in one file, without attributify.
+pub fn file_candidates(content: Vec<u8>, extension: &str) -> FxHashSet<String> {
+    let blob = expand_variant_groups(pre_process_input(content, extension));
+    let mut set = FxHashSet::default();
+    extract_lines(&blob, &mut set, &mut FxHashSet::default());
+    set
+}
+
+fn extract_lines(blob: &[u8], set: &mut FxHashSet<String>, seen: &mut FxHashSet<Box<[u8]>>) {
+    for line in blob.split(|x| *x == b'\n').filter(|line| !line.is_empty()) {
+        if seen.contains(line) {
+            continue;
+        }
+        seen.insert(line.into());
+        for extracted in Extractor::new(line).extract() {
+            let (Extracted::Candidate(bytes) | Extracted::CssVariable(bytes)) = extracted;
+            let Ok(candidate) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            if !set.contains(candidate) {
+                set.insert(candidate.to_owned());
+            }
+        }
+    }
 }
 
 fn read_changed_content(c: ChangedContent) -> Option<Vec<u8>> {
