@@ -1,4 +1,6 @@
+use crate::context::Scan;
 use lsp_types::{Position, Range};
+use std::cell::OnceCell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
@@ -25,12 +27,43 @@ pub struct Document {
     pub language: Language,
     pub version: i32,
     lines: Vec<usize>,
+    scan: OnceCell<Scan>,
 }
 
 impl Document {
     pub fn new(text: String, language: Language, version: i32) -> Self {
-        let lines = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
-        Self { text, language, version, lines }
+        let lines = std::iter::once(0).chain(memchr::memchr_iter(b'\n', text.as_bytes()).map(|i| i + 1)).collect();
+        Self { text, language, version, lines, scan: OnceCell::new() }
+    }
+
+    /// Replaces `range`, or with `None` the whole text, by `new`.
+    pub fn edit(&mut self, range: Option<Range>, new: &str, encoding: Encoding) {
+        let Some(range) = range else {
+            *self = Self::new(new.to_owned(), self.language, self.version);
+            return;
+        };
+        let start = self.offset(range.start, encoding);
+        let end = self.offset(range.end, encoding).max(start);
+        self.text.replace_range(start..end, new);
+        let kept = self.lines.partition_point(|&line| line <= start);
+        let removed = self.lines.partition_point(|&line| line <= end);
+        let added = memchr::memchr_iter(b'\n', new.as_bytes()).map(|i| start + i + 1);
+        let shifted = kept + added.clone().count();
+        self.lines.splice(kept..removed, added);
+        for line in &mut self.lines[shifted..] {
+            *line = *line - end + start + new.len();
+        }
+        self.scan.take();
+    }
+
+    /// The document's regions, scanned by `scan` on first use after a change.
+    pub fn scan(&self, scan: impl FnOnce() -> Scan) -> &Scan {
+        self.scan.get_or_init(scan)
+    }
+
+    /// Drops what was derived from the project and settings, which changed.
+    pub fn invalidate(&mut self) {
+        self.scan.take();
     }
 
     pub fn offset(&self, position: Position, encoding: Encoding) -> usize {

@@ -1,4 +1,5 @@
 mod bench;
+mod bench_lsp;
 mod bench_tailwind;
 mod check_core;
 mod codegen;
@@ -9,7 +10,8 @@ const USAGE: &str = "usage:
   cargo xtask check-core
   cargo xtask conformance <dir> [--tailwind <node_modules>]
   cargo xtask bench <input.css> <candidates.txt> [--runs N] [--hmr N] [--against <git-rev>]
-  cargo xtask bench-tailwind [--entry <app.css> --root <dir>] [--runs N] [scenario...]";
+  cargo xtask bench-tailwind [--entry <app.css> --root <dir>] [--runs N] [scenario...]
+  cargo xtask bench-lsp [--runs N] [scenario...]";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -19,6 +21,7 @@ fn main() {
         Some("conformance") => conformance::run(&args[1..]),
         Some("bench") => bench::run(&args[1..]),
         Some("bench-tailwind") => bench_tailwind::run(&args[1..]),
+        Some("bench-lsp") => bench_lsp::run(&args[1..]),
         Some("bench-run") => bench::workload(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };

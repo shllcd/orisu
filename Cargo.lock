@@ -1024,6 +1024,7 @@ dependencies = [
  "crossbeam-channel",
  "lsp-server",
  "lsp-types",
+ "memchr",
  "orisu_allocator",
  "orisu_ast",
  "orisu_canonical",
@@ -1910,6 +1911,7 @@ dependencies = [
  "orisu_compiler",
  "orisu_diagnostics",
  "orisu_optimizer",
+ "serde_json",
 ]
 
 [[package]]

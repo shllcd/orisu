@@ -134,27 +134,28 @@ fn measure(binary: &Path, css: &Path, candidates: &Path, runs: usize, hmr: usize
     Ok((instructions, fs::read(out).map_err(|e| e.to_string())?))
 }
 
-/// User-space instructions of one run of `program` and its stdout: `perf stat` on Linux, `time -l` on macOS.
+/// User-space instructions of one run of `program` and its stdout.
 pub(crate) fn count(program: &OsStr, args: &[&OsStr]) -> Result<(u64, String), String> {
-    let mut command = if cfg!(target_os = "macos") {
-        let mut command = Command::new("/usr/bin/time");
-        command.arg("-l");
-        command
-    } else {
-        let mut command = Command::new("perf");
-        command.args(["stat", "-x,", "-e", "instructions:u", "--"]);
-        command
-    };
-    let output = command.arg(program).args(args).output().map_err(|e| e.to_string())?;
+    let (counter, counter_args) = counter().split_first().expect("the counter is a command");
+    let output = Command::new(counter).args(counter_args).arg(program).args(args).output().map_err(|e| e.to_string())?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         return Err(stderr.into_owned());
     }
-    let parsed = if cfg!(target_os = "macos") {
+    let instructions = instructions(&stderr).ok_or_else(|| format!("no instruction count in:\n{stderr}"))?;
+    Ok((instructions, String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// The command prefix that makes a program report its user-space instructions on stderr: `perf stat` on Linux, `time -l` on macOS.
+pub(crate) fn counter() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") { &["/usr/bin/time", "-l"] } else { &["perf", "stat", "-x,", "-e", "instructions:u", "--"] }
+}
+
+/// The instruction count `counter` reported in `stderr`.
+pub(crate) fn instructions(stderr: &str) -> Option<u64> {
+    if cfg!(target_os = "macos") {
         stderr.lines().find_map(|line| line.trim().strip_suffix("instructions retired")).and_then(|n| n.trim().parse().ok())
     } else {
         stderr.lines().find(|line| line.contains("instructions")).and_then(|line| line.split(',').next()).and_then(|n| n.parse().ok())
-    };
-    let instructions = parsed.ok_or_else(|| format!("no instruction count in:\n{stderr}"))?;
-    Ok((instructions, String::from_utf8_lossy(&output.stdout).into_owned()))
+    }
 }

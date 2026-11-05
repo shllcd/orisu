@@ -26,7 +26,8 @@ pub fn check(entry: &std::path::Path, files: &[std::path::PathBuf], fix: bool) -
         let text = std::fs::read_to_string(file).map_err(|e| format!("Could not read `{}`: {e}", file.display()))?;
         let name = file.to_string_lossy();
         let language = document::Language::detect("", &name);
-        let reports = lint::lint(&project, &settings, &text, language, true)
+        let scan = lint::scan(&project, &settings, &text, language);
+        let reports = lint::lint(&project, &settings, &scan, true)
             .into_iter()
             .map(|finding| finding.report)
             .filter(|report| report.code() != orisu_diagnostics::Code::UnknownUtility || !report.fixes().is_empty())

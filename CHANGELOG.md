@@ -9,6 +9,10 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+### Changed
+
+- The language server takes incremental document changes and scans a document once per change, sharing the class regions between hover, completion, colors, code actions and diagnostics. Completion items are prepared once per project, and stylesheets are discovered in parallel. On the shadcn/ui `sidebar.tsx`, hover takes 122k instructions instead of 952k, completion 4.3M instead of 7.4M, colors 1.1M instead of 2.8M and diagnostics 2.3M instead of 3.4M; startup takes 52 ms instead of 58 ms.
+
 ## [0.4.0] - 2026-11-04
 
 ### Added

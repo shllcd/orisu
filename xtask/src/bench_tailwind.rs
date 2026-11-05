@@ -13,6 +13,7 @@ const SHADCN_REV: &str = "e31626978fe8e3804fe2e792e11e32dc560e40a8";
 const DEPENDENCIES: &str = r#"{
   "private": true,
   "dependencies": {
+    "@tailwindcss/language-server": "0.16.0",
     "@tailwindcss/node": "4.3.4",
     "@tailwindcss/oxide": "4.3.4",
     "clsx": "2.1.1",
@@ -105,22 +106,24 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     let selected = |scenario: &str| only.is_empty() || only.iter().any(|name| name == scenario);
     println!(
-        "{:<20}{:>7}{:>11}{:>11}{:>8}{:>13}{:>13}{:>11}{:>11}",
-        "scenario", "K", "tailwind", "orisu", "ratio", "tailwind", "orisu", "tailwind", "orisu"
+        "{:<20}{:>7}{:>11}{:>11}{:>8}{:>13}{:>13}{:>8}{:>11}{:>11}{:>8}",
+        "scenario", "K", "tailwind", "orisu", "ratio", "tailwind", "orisu", "ratio", "tailwind", "orisu", "ratio"
     );
     for &(scenario, k, tailwind) in SCENARIOS.iter().filter(|(scenario, ..)| selected(scenario)) {
         let orisu = measure(&script, &work, "orisu", scenario, k, runs)?;
         let tailwind = if tailwind { Some(measure(&script, &work, "tailwind", scenario, k, runs)?) } else { None };
         let tailwind = tailwind.as_ref();
         println!(
-            "{scenario:<20}{k:>7}{:>11}{:>11}{:>8}{:>13}{:>13}{:>11}{:>11}",
+            "{scenario:<20}{k:>7}{:>11}{:>11}{:>8}{:>13}{:>13}{:>8}{:>11}{:>11}{:>8}",
             tailwind.map(|t| si(t.instructions)).unwrap_or_default(),
             si(orisu.instructions),
             tailwind.map(|t| format!("{:.1}×", t.instructions / orisu.instructions)).unwrap_or_default(),
             tailwind.map(|t| duration(t.ms)).unwrap_or_default(),
             duration(orisu.ms),
+            tailwind.map(|t| format!("{:.1}×", t.ms / orisu.ms)).unwrap_or_default(),
             tailwind.map(|t| bytes(t.rss as f64)).unwrap_or_default(),
             bytes(orisu.rss as f64),
+            tailwind.map(|t| format!("{:.1}×", t.rss as f64 / orisu.rss as f64)).unwrap_or_default(),
         );
     }
 
@@ -189,7 +192,7 @@ fn measure(script: &Path, work: &Path, engine: &str, scenario: &str, k: u64, run
 }
 
 /// Installs the pinned Tailwind toolchain and the shadcn docs' CSS dependencies into `deps`, returning its `node_modules`.
-fn install(deps: &Path) -> Result<PathBuf, String> {
+pub(crate) fn install(deps: &Path) -> Result<PathBuf, String> {
     let manifest = deps.join("package.json");
     let modules = deps.join("node_modules");
     if fs::read_to_string(&manifest).ok().as_deref() == Some(DEPENDENCIES) && modules.exists() {
@@ -209,7 +212,7 @@ fn install(deps: &Path) -> Result<PathBuf, String> {
 }
 
 /// The shadcn docs app at `SHADCN_REV`, sparsely checked out into `work`, with `modules` linked as its `node_modules`.
-fn shadcn(work: &Path, modules: &Path) -> Result<(PathBuf, PathBuf), String> {
+pub(crate) fn shadcn(work: &Path, modules: &Path) -> Result<(PathBuf, PathBuf), String> {
     let repo = work.join("shadcn");
     let app = repo.join("apps/v4");
     if !app.exists() {
@@ -246,11 +249,11 @@ fn json(path: &Path) -> String {
     format!("\"{}\"", path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn duration(ms: f64) -> String {
+pub(crate) fn duration(ms: f64) -> String {
     if ms >= 1.0 { format!("{ms:.1} ms") } else { format!("{:.2} µs", ms * 1e3) }
 }
 
-fn bytes(n: f64) -> String {
+pub(crate) fn bytes(n: f64) -> String {
     match n.abs() {
         a if a >= 1048576.0 => format!("{:.1} MB", n / 1048576.0),
         a if a >= 1024.0 => format!("{:.1} KB", n / 1024.0),
@@ -258,7 +261,7 @@ fn bytes(n: f64) -> String {
     }
 }
 
-fn si(n: f64) -> String {
+pub(crate) fn si(n: f64) -> String {
     match n {
         n if n >= 1e9 => format!("{:.2}G", n / 1e9),
         n if n >= 1e6 => format!("{:.1}M", n / 1e6),

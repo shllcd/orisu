@@ -7,17 +7,37 @@ use orisu_compat_tailwind::Tailwind;
 use orisu_compiler::compiler::{self, CompileError, Compiler, Options, Stylesheet};
 use orisu_compiler::design_system::{Caches, DesignSystem, Session};
 use orisu_compiler::intellisense::{self, ClassEntry};
+use orisu_parser::segment::segment;
 use orisu_scanner::attributify::Attributify;
 use rustc_hash::FxHashMap;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Mutex;
 
 pub struct ClassInfo {
     pub css: Option<String>,
     pub color: Option<Rgba>,
     /// Sorted properties the class declares, outside `@property` and `@keyframes`.
     pub properties: Vec<String>,
+    /// Whether a class list shows the class's color: its utility names a theme color or takes an arbitrary value.
+    pub swatch: bool,
+    /// Length of the class's variant prefix, without the `:` before the utility.
+    pub variants: usize,
+}
+
+/// What completing classes needs, worked out once.
+pub struct ClassCompletions {
+    /// Per class, in the order of `classes`.
+    pub items: Vec<ClassCompletion>,
+    /// Indices into `classes`, bucketed by the name's first byte.
+    pub by_first_byte: Vec<Vec<u32>>,
+}
+
+pub struct ClassCompletion {
+    pub sort_text: String,
+    /// The hex of the theme color the class names.
+    pub color: Option<String>,
 }
 
 pub struct VariantItem {
@@ -41,9 +61,11 @@ pub struct Project {
     loaded_bytes: usize,
     variants: OnceCell<Vec<VariantItem>>,
     theme_colors: OnceCell<FxHashMap<String, Rgba>>,
+    completions: OnceCell<ClassCompletions>,
     infos: RefCell<FxHashMap<String, Rc<ClassInfo>>>,
     canonical: RefCell<FxHashMap<String, Option<String>>>,
     canonical_ready: Cell<bool>,
+    missing_theme_keys: RefCell<FxHashMap<String, bool>>,
 }
 
 struct State<'a> {
@@ -108,9 +130,11 @@ impl Project {
             loaded_bytes,
             variants: OnceCell::new(),
             theme_colors: OnceCell::new(),
+            completions: OnceCell::new(),
             infos: RefCell::default(),
             canonical: RefCell::default(),
             canonical_ready: Cell::new(false),
+            missing_theme_keys: RefCell::default(),
         })
     }
 
@@ -142,8 +166,33 @@ impl Project {
         })
     }
 
+    pub fn completions(&self) -> &ClassCompletions {
+        self.completions.get_or_init(|| {
+            let classes = self.classes();
+            let mut by_first_byte = vec![Vec::new(); 256];
+            for (i, entry) in classes.iter().enumerate() {
+                if let Some(&first) = entry.name.as_bytes().first() {
+                    by_first_byte[first as usize].push(i as u32);
+                }
+            }
+            let items = classes
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| ClassCompletion { sort_text: format!("a{i:05}"), color: self.names_color(&entry.name).map(|c| c.hex()) })
+                .collect();
+            ClassCompletions { items, by_first_byte }
+        })
+    }
+
+    /// The theme color named by a dash-separated suffix of `class`, ignoring any `/modifier`.
+    pub fn names_color(&self, class: &str) -> Option<Rgba> {
+        let colors = self.theme_colors();
+        let class = class.split('/').next().unwrap_or(class);
+        class.match_indices('-').find_map(|(i, _)| colors.get(&class[i + 1..]).copied())
+    }
+
     /// Theme colors by name, such as `red-500`; a class ending in one sets that color.
-    pub fn theme_colors(&self) -> &FxHashMap<String, Rgba> {
+    fn theme_colors(&self) -> &FxHashMap<String, Rgba> {
         self.theme_colors.get_or_init(|| {
             self.with_ds(|ds| {
                 let variable = |name: &str| self.variable(ds, name);
@@ -163,6 +212,9 @@ impl Project {
         if let Some(info) = self.infos.borrow().get(class) {
             return info.clone();
         }
+        let utility = segment(class, b':').last().copied().unwrap_or_default();
+        let swatch = self.names_color(utility).is_some() || utility.contains("-[") || utility.contains("-(");
+        let variants = (class.len() - utility.len()).saturating_sub(1);
         let info = Rc::new(self.with_session(|session| {
             let nodes = session.candidates_to_ast(&[class]).into_iter().next().filter(|nodes| !nodes.is_empty());
             let mut declarations = Vec::new();
@@ -177,7 +229,7 @@ impl Project {
             let mut properties: Vec<String> = declarations.iter().map(|(property, _)| (*property).to_owned()).collect();
             properties.sort_unstable();
             properties.dedup();
-            ClassInfo { css: nodes.map(|nodes| to_css(&nodes)), color, properties }
+            ClassInfo { css: nodes.map(|nodes| to_css(&nodes)), color, properties, swatch, variants }
         }));
         self.infos.borrow_mut().insert(class.to_owned(), info.clone());
         info
@@ -223,8 +275,13 @@ impl Project {
         let Some((namespace, _)) = rest.split_once('-') else {
             return false;
         };
+        if let Some(&missing) = self.missing_theme_keys.borrow().get(name) {
+            return missing;
+        }
         let namespace = format!("--{namespace}");
-        self.with_ds(|ds| self.variable(ds, name).is_none() && !ds.theme.keys_in_namespaces([namespace.as_str()]).is_empty())
+        let missing = self.with_ds(|ds| self.variable(ds, name).is_none() && !ds.theme.keys_in_namespaces([namespace.as_str()]).is_empty());
+        self.missing_theme_keys.borrow_mut().insert(name.to_owned(), missing);
+        missing
     }
 
     /// The canonical spelling of `class`, `None` when it already is canonical or unknown.
@@ -332,17 +389,26 @@ fn collect_variables(css: &str, out: &mut FxHashMap<String, String>) {
     }
 }
 
-/// CSS files under `roots` that import Tailwind, skipping `node_modules` and ignored files.
+/// CSS files under `roots` that import Tailwind, skipping `node_modules` and ignored files, sorted by path within each root.
 pub fn discover(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut entries = Vec::new();
     for root in roots {
-        let walker = orisu_ignore::WalkBuilder::new(root).filter_entry(|e| e.file_name() != "node_modules").build();
-        for entry in walker.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "css") && std::fs::read_to_string(path).is_ok_and(|css| is_entry(&css)) {
-                entries.push(path.to_path_buf());
-            }
-        }
+        let found = Mutex::new(Vec::new());
+        let walker = orisu_ignore::WalkBuilder::new(root).filter_entry(|e| e.file_name() != "node_modules").build_parallel();
+        walker.run(|| {
+            Box::new(|entry| {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|ext| ext == "css") && std::fs::read_to_string(path).is_ok_and(|css| is_entry(&css)) {
+                        found.lock().unwrap().push(entry.into_path());
+                    }
+                }
+                orisu_ignore::WalkState::Continue
+            })
+        });
+        let mut found = found.into_inner().unwrap();
+        found.sort_unstable();
+        entries.append(&mut found);
     }
     entries
 }
