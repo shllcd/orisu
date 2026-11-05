@@ -1910,6 +1910,7 @@ dependencies = [
  "orisu_compiler",
  "orisu_diagnostics",
  "orisu_optimizer",
+ "serde_json",
 ]
 
 [[package]]

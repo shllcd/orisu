@@ -13,19 +13,48 @@ are more stable than wall time. Memory is the process's peak RSS, Node included.
 
 ## Compiler
 
-| Scenario               | Instructions, Tailwind | orisu |      | Time, Tailwind |    orisu | Memory, Tailwind |    orisu |
-| ---------------------- | ---------------------: | ----: | ---: | -------------: | -------: | ---------------: | -------: |
-| compile                |                 282.8M | 30.3M | 9.3× |         9.0 ms |   1.7 ms |         108.7 MB |  74.1 MB |
-| scan                   |                  4.76G | 3.35G | 1.4× |       133.6 ms |  72.4 ms |         146.1 MB | 106.8 MB |
-| scan, cached           |                        | 355.9M |      |                |  16.7 ms |                  | 157.8 MB |
-| build                  |                  1.78G | 172.5M | 10.3× |        66.9 ms |  12.7 ms |         240.3 MB | 165.5 MB |
-| cold start             |                  7.17G | 3.56G | 2.0× |       222.0 ms |  88.2 ms |         244.4 MB | 125.9 MB |
-| HMR                    |                 345.3M | 16.7M | 20.7× |        17.9 ms |   1.1 ms |         311.1 MB | 110.8 MB |
-| HMR, no new class      |                   4.7M |  3.4M | 1.4× |         149 µs |   140 µs |         175.4 MB |  98.1 MB |
-| canonicalize, cold     |                 24.52G | 1.21G | 20.2× |      1145.1 ms |  27.7 ms |         963.6 MB | 112.5 MB |
-| canonicalize, warm     |                  95.7M |  1.3M | 72.8× |         4.0 ms |    68 µs |         467.6 MB |  86.5 MB |
+| Scenario               | Instructions, Tailwind |  orisu |       | Time, Tailwind |   orisu |       | Memory, Tailwind |    orisu |      |
+| ---------------------- | ---------------------: | -----: | ----: | -------------: | ------: | ----: | ---------------: | -------: | ---: |
+| compile                |                 282.8M |  30.3M |  9.3× |         9.0 ms |  1.7 ms |  5.3× |         108.7 MB |  74.1 MB | 1.5× |
+| scan                   |                  4.76G |  3.35G |  1.4× |       133.6 ms | 72.4 ms |  1.8× |         146.1 MB | 106.8 MB | 1.4× |
+| scan, cached           |                        | 355.9M |       |                | 16.7 ms |       |                  | 157.8 MB |      |
+| build                  |                  1.78G | 172.5M | 10.3× |        66.9 ms | 12.7 ms |  5.3× |         240.3 MB | 165.5 MB | 1.5× |
+| cold start             |                  7.17G |  3.56G |  2.0× |       222.0 ms | 88.2 ms |  2.5× |         244.4 MB | 125.9 MB | 1.9× |
+| HMR                    |                 345.3M |  16.7M | 20.7× |        17.9 ms |  1.1 ms | 16.3× |         311.1 MB | 110.8 MB | 2.8× |
+| HMR, no new class      |                   4.7M |   3.4M |  1.4× |         149 µs |  140 µs |  1.1× |         175.4 MB |  98.1 MB | 1.8× |
+| canonicalize, cold     |                 24.52G |  1.21G | 20.2× |      1145.1 ms | 27.7 ms | 41.3× |         963.6 MB | 112.5 MB | 8.6× |
+| canonicalize, warm     |                  95.7M |   1.3M | 72.8× |         4.0 ms |   68 µs | 58.8× |         467.6 MB |  86.5 MB | 5.4× |
 
 Tailwind has no scan cache, so `scan, cached` has no counterpart.
+
+## Language server
+
+`orisu-lsp` against `@tailwindcss/language-server` 0.16.0 with the project's Tailwind 4.3.4, both driven over stdio by the
+same client on the same project. Requests target `registry/new-york-v4/ui/sidebar.tsx`.
+
+```sh
+cargo xtask bench-lsp [scenario...]
+```
+
+| Scenario           | Instructions, Tailwind |  orisu |       | Time, Tailwind |   orisu |       | Memory, Tailwind |   orisu |      |
+| ------------------ | ---------------------: | -----: | ----: | -------------: | ------: | ----: | ---------------: | ------: | ---: |
+| startup            |                 47.38G |  2.21G | 21.4× |      2578.7 ms | 58.4 ms | 44.2× |         626.3 MB | 71.9 MB | 8.7× |
+| completion         |                 404.8M |   7.4M | 54.8× |        27.9 ms |  1.3 ms | 21.5× |         652.2 MB | 72.7 MB | 9.0× |
+| completion resolve |                 838.6k |  94.2k |  8.9× |         221 µs |  108 µs |  2.1× |         627.9 MB | 71.6 MB | 8.8× |
+| hover              |                  65.5M | 951.5k | 68.8× |         2.6 ms |  184 µs | 14.2× |         547.4 MB | 71.1 MB | 7.7× |
+| diagnostics        |                 175.4M |   3.4M | 51.3× |        12.1 ms |  951 µs | 12.7× |         642.4 MB | 71.9 MB | 8.9× |
+| colors             |                  67.8M |   2.8M | 24.0× |         3.2 ms |  544 µs |  5.9× |         617.3 MB | 72.0 MB | 8.6× |
+
+Instructions and memory are the server process's own; time is the client's wait, response parsing included. `startup`
+runs from spawning the server to the first non-empty completion list and counts the whole session; the other rows are
+per request after warm-up, measured like the compiler rows. `diagnostics` sends a full-text change that adds a new class
+and waits for the published diagnostics. Tailwind debounces diagnostics by 500 ms; the bench turns that off with its
+`testMode` option so the row compares work, not the delay.
+
+The servers don't answer identically. A completion at the start of a class lists 26614 items from Tailwind and the first
+1000 from orisu, marked incomplete so the editor asks again as you type. orisu finds 52 colors in the document, Tailwind
+none: the shadcn theme defines its colors through `var(…)`, which orisu resolves. After the edit, both report the same two
+class conflicts; orisu suggests three canonical classes, Tailwind two.
 
 ## cn
 
