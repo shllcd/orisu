@@ -33,16 +33,3 @@ and plugins merge correctly without extra configuration. Without Vite, `orisu bu
 same table as a module to import once.
 
 `cx` and `cva` are exported from `orisu/cn` too.
-
-## Benchmarks
-
-On the shadcn/ui docs, with byte-identical CSS:
-
-| Scenario           | Tailwind 4.3.4 |   orisu |
-| ------------------ | -------------: | ------: |
-| build              |        66.9 ms | 12.7 ms |
-| HMR                |        17.9 ms |  1.1 ms |
-| canonicalize, cold |      1145.1 ms | 27.7 ms |
-| `cn` per call      |        1.48 µs | 0.26 µs |
-
-The full numbers (instructions, memory, `cn` against shadcn's `cn`, bundle size) are in [BENCHMARKS.md](BENCHMARKS.md).
