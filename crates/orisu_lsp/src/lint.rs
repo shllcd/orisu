@@ -1,26 +1,28 @@
 //! The lints behind both the editor diagnostics and `orisu check`, reported against the diagnostic catalog.
 
-use crate::context::{Matcher, Region, Scope, Token};
+use crate::context::{Matcher, Scan, Scope, Token};
 use crate::document::Language;
-use crate::project::Project;
+use crate::project::{ClassInfo, Project};
 use crate::settings::{Level, Settings};
+use memchr::memmem;
 use orisu_diagnostics::{Code, Edit, Report, Span};
 use orisu_parser::segment::segment;
 use rustc_hash::FxHashMap;
+use std::rc::Rc;
 
 pub struct Finding {
     pub report: Report,
     pub level: Level,
 }
 
-pub fn regions<'t>(project: &Project, settings: &Settings, text: &'t str, language: Language) -> Vec<Region<'t>> {
+pub fn scan(project: &Project, settings: &Settings, text: &str, language: Language) -> Scan {
     let matcher =
         Matcher { attributes: &settings.class_attributes, functions: &settings.class_functions, attributify: project.attributify.as_ref() };
-    matcher.regions(text, language)
+    matcher.scan(text, language)
 }
 
-/// Lints `text`; canonical spellings only when `canonical`, since the first one takes a while.
-pub fn lint(project: &Project, settings: &Settings, text: &str, language: Language, canonical: bool) -> Vec<Finding> {
+/// Lints the scanned regions; canonical spellings only when `canonical`, since the first one takes a while.
+pub fn lint(project: &Project, settings: &Settings, scan: &Scan, canonical: bool) -> Vec<Finding> {
     let lint = &settings.lint;
     let mut out = Vec::new();
     let mut push = |report: Report, level: Level| {
@@ -28,11 +30,12 @@ pub fn lint(project: &Project, settings: &Settings, text: &str, language: Langua
             out.push(Finding { report, level });
         }
     };
-    for region in regions(project, settings, text, language).iter().filter(|r| r.scope == Scope::Classes) {
-        let tokens = region.tokens(text);
-        for token in tokens.iter().filter(|t| !t.grouped) {
+    for region in scan.regions.iter().filter(|r| r.scope == Scope::Classes) {
+        let tokens = &region.tokens;
+        let infos: Vec<Rc<ClassInfo>> = tokens.iter().map(|token| project.info(&token.class)).collect();
+        for (token, info) in tokens.iter().zip(&infos).filter(|(t, _)| !t.grouped) {
             let span = Span::new(token.start, token.end);
-            let known = project.info(&token.class).css.is_some();
+            let known = info.css.is_some();
             if !known {
                 if lint.unknown_classes != Level::Ignore
                     && let Some(report) = unknown(project, token)
@@ -56,7 +59,7 @@ pub fn lint(project: &Project, settings: &Settings, text: &str, language: Langua
             }
         }
         if lint.css_conflict != Level::Ignore {
-            for report in conflicts(project, &tokens) {
+            for report in conflicts(tokens, &infos) {
                 push(report, lint.css_conflict);
             }
         }
@@ -86,16 +89,14 @@ fn unknown(project: &Project, token: &Token) -> Option<Report> {
     Some(report.arg("suggestion", suggestion).fix(vec![replace(token, replacement)]))
 }
 
-fn conflicts(project: &Project, tokens: &[Token]) -> Vec<Report> {
-    let mut groups: FxHashMap<(String, Vec<String>), Vec<&Token>> = FxHashMap::default();
-    for token in tokens {
-        let info = project.info(&token.class);
+/// Tokens setting the same properties under the same variants; `infos` holds each token's class info.
+fn conflicts(tokens: &[Token], infos: &[Rc<ClassInfo>]) -> Vec<Report> {
+    let mut groups: FxHashMap<(&str, &[String]), Vec<&Token>> = FxHashMap::default();
+    for (token, info) in tokens.iter().zip(infos) {
         if info.properties.is_empty() {
             continue;
         }
-        let variants = segment(&token.class, b':');
-        let context = variants[..variants.len() - 1].join(":");
-        groups.entry((context, info.properties.clone())).or_default().push(token);
+        groups.entry((&token.class[..info.variants], &info.properties)).or_default().push(token);
     }
     let mut out = Vec::new();
     for group in groups.into_values().filter(|g| g.len() > 1) {
@@ -118,7 +119,7 @@ fn conflicts(project: &Project, tokens: &[Token]) -> Vec<Report> {
 /// Custom properties `class` reads through `(--name)` or `var(--name)`.
 fn referenced_variables(class: &str) -> impl Iterator<Item = &str> {
     let bytes = class.as_bytes();
-    class.match_indices("--").filter_map(move |(at, _)| {
+    memmem::find_iter(bytes, "--").filter_map(move |at| {
         if at == 0 || !matches!(bytes[at - 1], b'(' | b',') {
             return None;
         }

@@ -1024,6 +1024,7 @@ dependencies = [
  "crossbeam-channel",
  "lsp-server",
  "lsp-types",
+ "memchr",
  "orisu_allocator",
  "orisu_ast",
  "orisu_canonical",

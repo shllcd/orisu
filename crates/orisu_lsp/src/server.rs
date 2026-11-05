@@ -61,7 +61,7 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
         position_encoding: Some(if encoding == Encoding::Utf8 { PositionEncodingKind::UTF8 } else { PositionEncodingKind::UTF16 }),
         text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
             open_close: Some(true),
-            change: Some(TextDocumentSyncKind::FULL),
+            change: Some(TextDocumentSyncKind::INCREMENTAL),
             save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions { include_text: Some(false) })),
             ..TextDocumentSyncOptions::default()
         })),
@@ -227,6 +227,7 @@ impl Server {
             };
             self.publish_raw(path_uri(path), vec![diagnostic], None);
         }
+        self.documents.values_mut().for_each(Document::invalidate);
         let uris: Vec<Uri> = self.documents.keys().cloned().collect();
         for uri in uris {
             self.publish(&uri);
@@ -323,8 +324,11 @@ impl Server {
             DidChangeTextDocument::METHOD => {
                 let params = parse::<DidChangeTextDocument>(notification)?;
                 let uri = params.text_document.uri;
-                if let (Some(change), Some(doc)) = (params.content_changes.into_iter().last(), self.documents.get_mut(&uri)) {
-                    *doc = Document::new(change.text, doc.language, params.text_document.version);
+                if let Some(doc) = self.documents.get_mut(&uri) {
+                    for change in params.content_changes {
+                        doc.edit(change.range, &change.text, self.encoding);
+                    }
+                    doc.version = params.text_document.version;
                 }
                 self.publish(&uri);
             }

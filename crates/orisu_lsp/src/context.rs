@@ -2,22 +2,31 @@
 //! `@apply` and, with `@attributify`, utility attributes.
 
 use crate::document::Language;
+use memchr::memmem;
 use orisu_scanner::attributify::Attributify;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope<'t> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
     Classes,
     /// The value of `bg="red-500 hover:blue-500"`.
-    Attribute(&'t str),
+    Attribute(String),
     /// A valueless attribute such as `p-4`, which is the utility itself.
     Bare,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Region<'t> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region {
     pub start: usize,
     pub end: usize,
-    pub scope: Scope<'t>,
+    pub scope: Scope,
+    pub tokens: Vec<Token>,
+}
+
+/// A document's regions in order of `(start, end)`, one per start, each with its tokens.
+pub struct Scan {
+    pub regions: Vec<Region>,
+    /// The largest `end` among `regions[..=i]`.
+    reach: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +45,7 @@ pub struct Matcher<'s> {
 }
 
 impl Matcher<'_> {
-    pub fn regions<'t>(&self, text: &'t str, language: Language) -> Vec<Region<'t>> {
+    pub fn scan(&self, text: &str, language: Language) -> Scan {
         let mut out = Vec::new();
         apply_regions(text, &mut out);
         if language == Language::Markup {
@@ -48,24 +57,27 @@ impl Matcher<'_> {
         }
         out.sort_by_key(|r| (r.start, r.end));
         out.dedup_by_key(|r| r.start);
-        out
+        for region in &mut out {
+            region.tokens = region.tokenize(text);
+        }
+        let reach = out
+            .iter()
+            .scan(0, |reach, r| {
+                *reach = r.end.max(*reach);
+                Some(*reach)
+            })
+            .collect();
+        Scan { regions: out, reach }
     }
 
-    fn attribute_regions<'t>(&self, text: &'t str, out: &mut Vec<Region<'t>>) {
+    fn attribute_regions(&self, text: &str, out: &mut Vec<Region>) {
         let bytes = text.as_bytes();
+        let mut names = Words::new(self.attributes, bytes, is_attribute_byte);
         let mut i = 0;
-        while i < bytes.len() {
-            if !is_attribute_byte(bytes[i]) || (i > 0 && !bytes[i - 1].is_ascii_whitespace()) {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < bytes.len() && is_attribute_byte(bytes[i]) {
-                i += 1;
-            }
-            if !self.attributes.iter().any(|a| a.as_bytes() == &bytes[start..i]) {
-                continue;
-            }
+        while let Some((start, end)) = names.next(bytes, i, |start, end| {
+            (start == 0 || bytes[start - 1].is_ascii_whitespace()) && !bytes.get(end).is_some_and(|&b| is_attribute_byte(b))
+        }) {
+            i = end;
             let mut j = skip_whitespace(bytes, i);
             if bytes.get(j) != Some(&b'=') {
                 continue;
@@ -78,7 +90,7 @@ impl Matcher<'_> {
                     if bound {
                         expression_strings(bytes, j + 1, end, out);
                     } else {
-                        out.push(Region { start: j + 1, end, scope: Scope::Classes });
+                        out.push(Region::new(j + 1, end, Scope::Classes));
                     }
                     i = end;
                 }
@@ -88,23 +100,19 @@ impl Matcher<'_> {
         }
     }
 
-    fn function_regions<'t>(&self, text: &'t str, out: &mut Vec<Region<'t>>) {
+    fn function_regions(&self, text: &str, out: &mut Vec<Region>) {
         let bytes = text.as_bytes();
+        let mut names = Words::new(self.functions, bytes, is_ident_byte);
         let mut i = 0;
-        while i < bytes.len() {
-            if !is_ident_byte(bytes[i]) {
-                i += 1;
+        while let Some((start, end)) = names.next(bytes, i, |start, end| {
+            (start == 0 || !is_ident_byte(bytes[start - 1])) && !bytes.get(end).is_some_and(|&b| is_ident_byte(b))
+        }) {
+            i = end;
+            if start > 0 && bytes[start - 1] == b'.' {
                 continue;
             }
-            let start = i;
-            while i < bytes.len() && is_ident_byte(bytes[i]) {
-                i += 1;
-            }
-            if (start > 0 && bytes[start - 1] == b'.') || !self.functions.iter().any(|f| f.as_bytes() == &bytes[start..i]) {
-                continue;
-            }
-            let line = bytes[..start].iter().rposition(|&b| b == b'\n').map_or(0, |n| n + 1);
-            if bytes[line..start].windows(2).any(|w| w == b"//") {
+            let line = memchr::memrchr(b'\n', &bytes[..start]).map_or(0, |n| n + 1);
+            if memmem::find(&bytes[line..start], b"//").is_some() {
                 continue;
             }
             match bytes.get(i) {
@@ -119,7 +127,7 @@ impl Matcher<'_> {
         }
     }
 
-    fn attributify_regions<'t>(&self, text: &'t str, attributify: &Attributify, out: &mut Vec<Region<'t>>) {
+    fn attributify_regions(&self, text: &str, attributify: &Attributify, out: &mut Vec<Region>) {
         let bytes = text.as_bytes();
         let mut i = 0;
         while let Some(at) = memchr(&bytes[i..], b'<') {
@@ -157,7 +165,7 @@ impl Matcher<'_> {
                 let mut j = skip_whitespace(bytes, i);
                 if bytes.get(j) != Some(&b'=') {
                     if accepted {
-                        out.push(Region { start, end: i, scope: Scope::Bare });
+                        out.push(Region::new(start, i, Scope::Bare));
                     }
                     continue;
                 }
@@ -166,7 +174,7 @@ impl Matcher<'_> {
                     Some(&quote @ (b'"' | b'\'')) => {
                         let end = memchr_from(bytes, j + 1, quote);
                         if accepted {
-                            out.push(Region { start: j + 1, end, scope: Scope::Attribute(name) });
+                            out.push(Region::new(j + 1, end, Scope::Attribute(name.to_owned())));
                         }
                         i = end + 1;
                     }
@@ -178,10 +186,67 @@ impl Matcher<'_> {
     }
 }
 
-impl Region<'_> {
-    pub fn tokens(&self, text: &str) -> Vec<Token> {
+/// Occurrences of any of a few words in a text, earliest first.
+struct Words<'w> {
+    /// Each word's finder and its next occurrence, `usize::MAX` once there is none.
+    finders: Vec<(memmem::Finder<'w>, usize)>,
+}
+
+impl<'w> Words<'w> {
+    /// Finds `words` in `bytes`, skipping those with a byte outside `valid`, which can never be a whole word.
+    fn new(words: &'w [String], bytes: &[u8], valid: fn(u8) -> bool) -> Self {
+        let finders = words
+            .iter()
+            .filter(|word| !word.is_empty() && word.bytes().all(valid))
+            .map(|word| {
+                let finder = memmem::Finder::new(word.as_bytes());
+                let at = finder.find(bytes).unwrap_or(usize::MAX);
+                (finder, at)
+            })
+            .collect();
+        Self { finders }
+    }
+
+    /// The first occurrence at or after `from` that `accept` takes, as its start and end.
+    fn next(&mut self, bytes: &[u8], from: usize, accept: impl Fn(usize, usize) -> bool) -> Option<(usize, usize)> {
+        loop {
+            let mut first: Option<(usize, usize)> = None;
+            for (k, (finder, at)) in self.finders.iter_mut().enumerate() {
+                if *at < from {
+                    *at = finder.find(&bytes[from..]).map_or(usize::MAX, |n| from + n);
+                }
+                if *at != usize::MAX && first.is_none_or(|(start, _)| *at < start) {
+                    first = Some((*at, k));
+                }
+            }
+            let (start, k) = first?;
+            let (finder, at) = &mut self.finders[k];
+            let end = start + finder.needle().len();
+            if accept(start, end) {
+                return Some((start, end));
+            }
+            *at = finder.find(&bytes[start + 1..]).map_or(usize::MAX, |n| start + 1 + n);
+        }
+    }
+}
+
+impl Scan {
+    /// The regions holding `offset`, in order.
+    pub fn around(&self, offset: usize) -> impl DoubleEndedIterator<Item = &Region> {
+        let end = self.regions.partition_point(|r| r.start <= offset);
+        let start = self.reach[..end].partition_point(|&reach| reach < offset);
+        self.regions[start..end].iter().filter(move |r| offset <= r.end)
+    }
+}
+
+impl Region {
+    fn new(start: usize, end: usize, scope: Scope) -> Self {
+        Self { start, end, scope, tokens: Vec::new() }
+    }
+
+    fn tokenize(&self, text: &str) -> Vec<Token> {
         let source = &text[self.start..self.end];
-        match self.scope {
+        match &self.scope {
             Scope::Bare => vec![Token { start: self.start, end: self.end, class: format!("[{source}=\"\"]"), grouped: false }],
             Scope::Attribute(name) => words(source)
                 .filter(|&(_, word)| !word.contains('"'))
@@ -241,7 +306,7 @@ fn class_tokens(source: &str, base: usize, out: &mut Vec<Token>) {
             prefixes.push(format!("{prefix}{text}"));
             i += 1;
         } else if !text.is_empty() {
-            out.push(Token { start: base + start, end: base + i, class: format!("{prefix}{text}"), grouped: prefixes.len() > 1 });
+            out.push(Token { start: base + start, end: base + i, class: [prefix, text].concat(), grouped: prefixes.len() > 1 });
         }
     }
 }
@@ -265,7 +330,7 @@ fn close(bytes: &[u8], open: usize, kind: u8) -> usize {
     bytes.len()
 }
 
-fn apply_regions<'t>(text: &'t str, out: &mut Vec<Region<'t>>) {
+fn apply_regions(text: &str, out: &mut Vec<Region>) {
     let bytes = text.as_bytes();
     for (at, _) in text.match_indices("@apply") {
         let start = at + "@apply".len();
@@ -274,13 +339,13 @@ fn apply_regions<'t>(text: &'t str, out: &mut Vec<Region<'t>>) {
         }
         let end = bytes[start..].iter().position(|&b| matches!(b, b';' | b'}')).map_or(bytes.len(), |n| start + n);
         let end = text[start..end].find("!important").map_or(end, |n| start + n);
-        out.push(Region { start, end, scope: Scope::Classes });
+        out.push(Region::new(start, end, Scope::Classes));
     }
 }
 
 /// Collects every string literal in the JS expression bracketed at `open`; returns the index
 /// after its closing bracket.
-fn js_strings<'t>(bytes: &[u8], open: usize, out: &mut Vec<Region<'t>>) -> usize {
+fn js_strings(bytes: &[u8], open: usize, out: &mut Vec<Region>) -> usize {
     let mut depth = 0usize;
     let mut i = open;
     while i < bytes.len() {
@@ -294,7 +359,7 @@ fn js_strings<'t>(bytes: &[u8], open: usize, out: &mut Vec<Region<'t>>) -> usize
             }
             quote @ (b'"' | b'\'') => {
                 let end = string_end(bytes, i + 1, quote);
-                out.push(Region { start: i + 1, end, scope: Scope::Classes });
+                out.push(Region::new(i + 1, end, Scope::Classes));
                 i = end;
             }
             b'`' => {
@@ -314,13 +379,13 @@ fn js_strings<'t>(bytes: &[u8], open: usize, out: &mut Vec<Region<'t>>) -> usize
 
 /// Collects the string literals of a JS expression held in an attribute value, like Vue's
 /// `:class="['a', ok && 'b']"`.
-fn expression_strings<'t>(bytes: &[u8], start: usize, end: usize, out: &mut Vec<Region<'t>>) {
+fn expression_strings(bytes: &[u8], start: usize, end: usize, out: &mut Vec<Region>) {
     let mut i = start;
     while i < end {
         match bytes[i] {
             quote @ (b'"' | b'\'') => {
                 let close = string_end(bytes, i + 1, quote).min(end);
-                out.push(Region { start: i + 1, end: close, scope: Scope::Classes });
+                out.push(Region::new(i + 1, close, Scope::Classes));
                 i = close + 1;
             }
             b'`' => i = template(&bytes[..end], i + 1, out),
@@ -331,25 +396,25 @@ fn expression_strings<'t>(bytes: &[u8], start: usize, end: usize, out: &mut Vec<
 
 /// Collects the text of the template literal starting at `start`, recursing into `${…}`; returns
 /// the index after the closing backtick.
-fn template<'t>(bytes: &[u8], start: usize, out: &mut Vec<Region<'t>>) -> usize {
+fn template(bytes: &[u8], start: usize, out: &mut Vec<Region>) -> usize {
     let mut text_start = start;
     let mut i = start;
     while i < bytes.len() {
         match bytes[i] {
             b'\\' => i += 2,
             b'`' => {
-                out.push(Region { start: text_start, end: i, scope: Scope::Classes });
+                out.push(Region::new(text_start, i, Scope::Classes));
                 return i + 1;
             }
             b'$' if bytes.get(i + 1) == Some(&b'{') => {
-                out.push(Region { start: text_start, end: i, scope: Scope::Classes });
+                out.push(Region::new(text_start, i, Scope::Classes));
                 i = js_strings(bytes, i + 1, out);
                 text_start = i;
             }
             _ => i += 1,
         }
     }
-    out.push(Region { start: text_start, end: bytes.len(), scope: Scope::Classes });
+    out.push(Region::new(text_start, bytes.len(), Scope::Classes));
     bytes.len()
 }
 

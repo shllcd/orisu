@@ -36,14 +36,14 @@ same client on the same project. Requests target `registry/new-york-v4/ui/sideba
 cargo xtask bench-lsp [scenario...]
 ```
 
-| Scenario           | Instructions, Tailwind |  orisu |       | Time, Tailwind |   orisu |       | Memory, Tailwind |   orisu |      |
-| ------------------ | ---------------------: | -----: | ----: | -------------: | ------: | ----: | ---------------: | ------: | ---: |
-| startup            |                 47.38G |  2.21G | 21.4× |      2578.7 ms | 58.4 ms | 44.2× |         626.3 MB | 71.9 MB | 8.7× |
-| completion         |                 404.8M |   7.4M | 54.8× |        27.9 ms |  1.3 ms | 21.5× |         652.2 MB | 72.7 MB | 9.0× |
-| completion resolve |                 838.6k |  94.2k |  8.9× |         221 µs |  108 µs |  2.1× |         627.9 MB | 71.6 MB | 8.8× |
-| hover              |                  65.5M | 951.5k | 68.8× |         2.6 ms |  184 µs | 14.2× |         547.4 MB | 71.1 MB | 7.7× |
-| diagnostics        |                 175.4M |   3.4M | 51.3× |        12.1 ms |  951 µs | 12.7× |         642.4 MB | 71.9 MB | 8.9× |
-| colors             |                  67.8M |   2.8M | 24.0× |         3.2 ms |  544 µs |  5.9× |         617.3 MB | 72.0 MB | 8.6× |
+| Scenario           | Instructions, Tailwind |  orisu |        | Time, Tailwind |   orisu |       | Memory, Tailwind |   orisu |      |
+| ------------------ | ---------------------: | -----: | -----: | -------------: | ------: | ----: | ---------------: | ------: | ---: |
+| startup            |                 47.42G |  2.34G |  20.3× |      2646.0 ms | 52.0 ms | 50.9× |         619.4 MB | 72.8 MB | 8.5× |
+| completion         |                 404.4M |   4.3M |  95.0× |        28.9 ms |  1.1 ms | 25.9× |         675.6 MB | 75.1 MB | 9.0× |
+| completion resolve |                   1.4M | 128.2k |  10.6× |         180 µs |   94 µs |  1.9× |         628.0 MB | 74.3 MB | 8.5× |
+| hover              |                  65.5M | 122.3k | 535.6× |         2.6 ms |  111 µs | 23.6× |         630.3 MB | 71.0 MB | 8.9× |
+| diagnostics        |                 172.2M |   2.3M |  74.0× |        11.8 ms |  865 µs | 13.6× |         619.0 MB | 73.2 MB | 8.5× |
+| colors             |                  66.0M |   1.1M |  60.5× |         3.3 ms |  351 µs |  9.4× |         630.8 MB | 72.8 MB | 8.7× |
 
 Instructions and memory are the server process's own; time is the client's wait, response parsing included. `startup`
 runs from spawning the server to the first non-empty completion list and counts the whole session; the other rows are

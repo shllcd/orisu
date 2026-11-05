@@ -24,6 +24,7 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 - `compileAsync` loads all the missing `@import`s of an attempt together instead of restarting once per import.
 - Adding a file to the scanner walks only the directories that lead to it instead of the whole source tree.
 - The language server recompiles only the projects whose stylesheets changed, recompiles a project whose memory has grown far beyond its initial size, and finds misspelling suggestions among classes of similar length only.
+- The language server takes incremental document changes and scans a document once per change, sharing the class regions between hover, completion, colors, code actions and diagnostics. Completion items are prepared once per project, and stylesheets are discovered in parallel. On the shadcn/ui `sidebar.tsx`, hover takes 122k instructions instead of 952k, completion 4.3M instead of 7.4M, colors 1.1M instead of 2.8M and diagnostics 2.3M instead of 3.4M; startup takes 52 ms instead of 58 ms.
 
 ### Fixed
 

@@ -1,5 +1,5 @@
 use crate::color::Rgba;
-use crate::context::{Region, Scope, Token};
+use crate::context::{Scan, Scope, Token};
 use crate::document::{Document, Encoding};
 use crate::lint;
 use crate::project::Project;
@@ -11,9 +11,9 @@ use lsp_types::{
 };
 use orisu_diagnostics::Report;
 use orisu_parser::segment::segment;
-use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde_json::json;
+use std::borrow::Cow;
 
 pub const SOURCE: &str = "orisu";
 
@@ -32,11 +32,11 @@ pub struct Ctx<'a> {
 /// A completion list with `itemDefaults`, which `lsp-types` lacks; it keeps a list of every class small.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Completions {
+pub struct Completions<'a> {
     is_incomplete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     item_defaults: Option<Defaults>,
-    items: Vec<Item>,
+    items: Vec<Item<'a>>,
 }
 
 #[derive(Serialize)]
@@ -48,32 +48,29 @@ struct Defaults {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Item {
-    label: String,
+struct Item<'a> {
+    label: Cow<'a, str>,
     kind: CompletionItemKind,
-    sort_text: String,
+    sort_text: Cow<'a, str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    documentation: Option<String>,
+    documentation: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text_edit: Option<TextEdit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
 }
 
-impl Ctx<'_> {
-    fn regions(&self) -> Vec<Region<'_>> {
-        lint::regions(self.project, self.settings, &self.doc.text, self.doc.language)
+impl<'a> Ctx<'a> {
+    fn scan(&self) -> &Scan {
+        self.doc.scan(|| lint::scan(self.project, self.settings, &self.doc.text, self.doc.language))
     }
 
     fn range(&self, start: usize, end: usize) -> Range {
         self.doc.range(start, end, self.encoding)
     }
 
-    fn token_at(&self, offset: usize) -> Option<Token> {
-        self.regions()
-            .iter()
-            .filter(|r| r.start <= offset && offset <= r.end)
-            .find_map(|r| r.tokens(&self.doc.text).into_iter().find(|t| t.start <= offset && offset <= t.end))
+    fn token_at(&self, offset: usize) -> Option<&Token> {
+        self.scan().around(offset).find_map(|r| r.tokens.iter().find(|t| t.start <= offset && offset <= t.end))
     }
 
     pub fn hover(&self, offset: usize) -> Option<Hover> {
@@ -88,9 +85,8 @@ impl Ctx<'_> {
         })
     }
 
-    pub fn completion(&self, offset: usize) -> Option<Completions> {
-        let regions = self.regions();
-        let region = regions.iter().rev().find(|r| r.start <= offset && offset <= r.end)?;
+    pub fn completion(&self, offset: usize) -> Option<Completions<'a>> {
+        let region = self.scan().around(offset).next_back()?;
         let text = &self.doc.text;
         let bytes = text.as_bytes();
         let mut start = offset;
@@ -111,34 +107,40 @@ impl Ctx<'_> {
         let range = self.range(word_start, offset);
         let first = word.bytes().next();
         let matches = |label: &str| first.is_none_or(|f| label.as_bytes().first() == Some(&f));
-        let prefix = match region.scope {
+        let prefix = match &region.scope {
             Scope::Attribute(name) => format!("{name}-"),
             _ => String::new(),
         };
         let data = json!({ "entry": self.project.entry, "prefix": prefix });
-        let item = |label: &str, kind, sort_text: String, documentation: Option<String>, data: Option<&serde_json::Value>| Item {
-            label: label.to_owned(),
+        let item = |label: Cow<'a, str>, kind, sort_text, documentation, data: Option<&serde_json::Value>| Item {
+            text_edit: (!self.item_defaults).then(|| TextEdit { range, new_text: label.to_string() }),
+            label,
             kind,
             sort_text,
             documentation,
-            text_edit: (!self.item_defaults).then(|| TextEdit { range, new_text: label.to_owned() }),
             data: data.filter(|_| !self.item_defaults).cloned(),
         };
-        let colors = self.project.theme_colors();
+        let classes = self.project.classes();
+        let completions = self.project.completions();
+        let indices: Box<dyn Iterator<Item = usize>> = match first.filter(|_| prefix.is_empty()) {
+            Some(first) => Box::new(completions.by_first_byte[first as usize].iter().map(|&i| i as usize)),
+            None => Box::new(0..classes.len()),
+        };
         let mut items = Vec::new();
-        let mut truncated = false;
-        for (i, entry) in self.project.classes().iter().enumerate() {
+        let mut last = 0;
+        for i in indices {
             if items.len() >= MAX_ITEMS {
-                truncated = true;
                 break;
             }
-            let Some(label) = entry.name.strip_prefix(&prefix).filter(|label| matches(label)) else {
+            let Some(label) = classes[i].name.strip_prefix(&prefix).filter(|label| matches(label)) else {
                 continue;
             };
-            let color = names_color(&entry.name, colors);
-            let kind = if color.is_some() { CompletionItemKind::COLOR } else { CompletionItemKind::CONSTANT };
-            items.push(item(label, kind, format!("a{i:05}"), color.map(|c| c.hex()), Some(&data)));
+            let class = &completions.items[i];
+            let kind = if class.color.is_some() { CompletionItemKind::COLOR } else { CompletionItemKind::CONSTANT };
+            items.push(item(Cow::Borrowed(label), kind, Cow::Borrowed(&class.sort_text), class.color.as_deref(), Some(&data)));
+            last = i;
         }
+        let mut truncated = items.len() >= MAX_ITEMS && last + 1 < classes.len();
         let mut n = 0;
         for variant in self.project.variants() {
             if items.len() >= MAX_ITEMS {
@@ -154,7 +156,7 @@ impl Ctx<'_> {
                 }
                 if matches(&label) {
                     n += 1;
-                    items.push(item(&label, CompletionItemKind::MODULE, format!("b{n:05}"), None, None));
+                    items.push(item(Cow::Owned(label), CompletionItemKind::MODULE, Cow::Owned(format!("b{n:05}")), None, None));
                 }
             }
         }
@@ -164,7 +166,7 @@ impl Ctx<'_> {
 
     /// Lints the document; canonical spellings only when `canonical`, since the first one takes a while.
     pub fn diagnostics(&self, uri: &Uri, canonical: bool) -> Vec<Diagnostic> {
-        let findings = lint::lint(self.project, self.settings, &self.doc.text, self.doc.language, canonical);
+        let findings = lint::lint(self.project, self.settings, self.scan(), canonical);
         findings.into_iter().filter_map(|finding| Some(self.diagnostic(uri, &finding.report, finding.level.severity()?))).collect()
     }
 
@@ -214,7 +216,7 @@ impl Ctx<'_> {
         let start = self.doc.offset(range.start, self.encoding);
         let end = self.doc.offset(range.end, self.encoding);
         let text = &self.doc.text;
-        for region in self.regions().iter().filter(|r| r.scope == Scope::Classes && r.start <= start && end <= r.end) {
+        for region in self.scan().around(start).filter(|r| r.scope == Scope::Classes && end <= r.end) {
             let source = &text[region.start..region.end];
             if source.contains(['(', '\n']) || source.trim().is_empty() {
                 continue;
@@ -237,19 +239,14 @@ impl Ctx<'_> {
     }
 
     pub fn colors(&self) -> Vec<ColorInformation> {
-        let colors = self.project.theme_colors();
         let mut out = Vec::new();
-        for region in self.regions() {
-            for token in region.tokens(&self.doc.text) {
-                let utility = segment(&token.class, b':').last().copied().unwrap_or_default().to_owned();
-                if region.scope == Scope::Classes
-                    && names_color(&utility, colors).is_none()
-                    && !utility.contains("-[")
-                    && !utility.contains("-(")
-                {
+        for region in &self.scan().regions {
+            for token in &region.tokens {
+                let info = self.project.info(&token.class);
+                if region.scope == Scope::Classes && !info.swatch {
                     continue;
                 }
-                if let Some(color) = self.project.info(&token.class).color {
+                if let Some(color) = info.color {
                     out.push(ColorInformation { range: self.range(token.start, token.end), color: lsp_color(color) });
                 }
             }
@@ -261,12 +258,6 @@ impl Ctx<'_> {
 fn capitalize(title: &str) -> String {
     let mut chars = title.chars();
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
-}
-
-/// The theme color named by a dash-separated suffix of `class`, ignoring any `/modifier`.
-fn names_color(class: &str, colors: &FxHashMap<String, Rgba>) -> Option<Rgba> {
-    let class = class.split('/').next().unwrap_or(class);
-    class.match_indices('-').find_map(|(i, _)| colors.get(&class[i + 1..]).copied())
 }
 
 fn lsp_color(c: Rgba) -> Color {
