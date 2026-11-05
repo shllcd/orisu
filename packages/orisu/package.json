@@ -1,6 +1,6 @@
 {
   "name": "orisu",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Atomic CSS engine compatible with Tailwind CSS 4",
   "repository": {
     "type": "git",
@@ -49,14 +49,14 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "optionalDependencies": {
-    "@orisu/binding-darwin-arm64": "0.3.0",
-    "@orisu/binding-darwin-x64": "0.3.0",
-    "@orisu/binding-linux-arm64-gnu": "0.3.0",
-    "@orisu/binding-linux-arm64-musl": "0.3.0",
-    "@orisu/binding-linux-x64-gnu": "0.3.0",
-    "@orisu/binding-linux-x64-musl": "0.3.0",
-    "@orisu/binding-win32-arm64-msvc": "0.3.0",
-    "@orisu/binding-win32-x64-msvc": "0.3.0"
+    "@orisu/binding-darwin-arm64": "0.4.0",
+    "@orisu/binding-darwin-x64": "0.4.0",
+    "@orisu/binding-linux-arm64-gnu": "0.4.0",
+    "@orisu/binding-linux-arm64-musl": "0.4.0",
+    "@orisu/binding-linux-x64-gnu": "0.4.0",
+    "@orisu/binding-linux-x64-musl": "0.4.0",
+    "@orisu/binding-win32-arm64-msvc": "0.4.0",
+    "@orisu/binding-win32-x64-msvc": "0.4.0"
   },
   "peerDependencies": {
     "lightningcss": "^1.30.0",

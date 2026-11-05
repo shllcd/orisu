@@ -13,7 +13,7 @@ import { compile, lsp, optimize, Scanner, type Compiler } from "./index.ts";
 import type { ChangedContent, SourceEntry } from "./native.ts";
 import { encodeMergeTable } from "./table.ts";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const DEFAULT_INPUT = '@import "tailwindcss";\n';
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEBOUNCE_MS = 10;
