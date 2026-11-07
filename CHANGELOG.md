@@ -21,6 +21,7 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ### Fixed
 
+- The Vite plugin's `mangle` no longer fails when other stylesheets use Tailwind without emitting utilities, like component files with `@reference "tailwindcss"`; it renames the stylesheet with utilities and checks the others for clashes.
 - The scanner and the language server no longer crash on a tag ending in an unterminated quoted attribute, and the language server reads unquoted attributify values like `bg=red-500`, as the scanner does.
 - The language server reports a `configFile` setting of the wrong type instead of ignoring it, and `compile` rejects `polyfills` beyond 8 bits instead of truncating them.
 - The Vite plugin rejects a malformed saved mangle plan (odd `names`, mismatched `keys`/`values`, missing `namePrefix`) with an error instead of silently using it, and fills placeholders natively when no plan is saved.

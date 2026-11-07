@@ -33,6 +33,7 @@ interface LintedFile {
 const SPECIAL_QUERY_RE = /[?&](?:worker|sharedworker|raw|url)\b/;
 const COMMON_JS_PROXY_RE = /\?commonjs-proxy/;
 const INLINE_STYLE_ID_RE = /[?&]index=\d+\.css$/;
+const CSS_MODULE_RE = /\.module\.css(?:$|\?)/;
 const JS_EXTENSIONS_RE = /^\.[cm]?[jt]sx?$/;
 const CSS_LANGS_RE = /\.(css|less|sass|scss|styl|stylus|pcss|postcss|sss)(?:$|\?)/;
 const MERGE_TABLE_ID = "\0orisu/merge-table";
@@ -143,10 +144,15 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
   const foreignStylesheets = new Map<string, string>();
 
   function findRoot(envName: string): Root | undefined {
+    let fallback: Root | undefined;
     for (const name of [envName, "client", ...rootsByEnv.keys()]) {
-      for (const root of rootsByEnv.get(name).values()) if (root.compiler) return root;
+      for (const root of rootsByEnv.get(name).values()) {
+        if (!root.compiler) continue;
+        if (root.compiler.features & Features.Utilities) return root;
+        fallback ??= root;
+      }
     }
-    return undefined;
+    return fallback;
   }
 
   function mergeTable(envName: string): string {
@@ -232,10 +238,13 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
     const result = await root.generate(src, (file) => this.addWatchFile(file));
     if (!result) {
       roots.delete(id);
-      if (mangleOptions && config!.command === "build" && !/\.module\.css(?:$|\?)/.test(id)) foreignStylesheets.set(id, src);
+      if (mangleOptions && config!.command === "build" && !CSS_MODULE_RE.test(id)) foreignStylesheets.set(id, src);
       return;
     }
-    if (mangleOptions && config!.command === "build") result.code = await mangleStylesheet(root, result.code, env);
+    if (mangleOptions && config!.command === "build") {
+      if (root.compiler!.features & Features.Utilities) result.code = await mangleStylesheet(root, result.code, env);
+      else if (!CSS_MODULE_RE.test(id)) foreignStylesheets.set(id, result.code);
+    }
     onFirstRoot?.();
     onFirstRoot = undefined;
     scheduleDiagnostics();
