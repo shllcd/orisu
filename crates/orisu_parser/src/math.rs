@@ -2,6 +2,7 @@
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
 use orisu_allocator::{Allocator, Vec};
+use orisu_ast::bytes::CSS_WS;
 
 const MATH_FUNCTIONS: [&str; 19] = [
     "calc", "min", "max", "clamp", "mod", "rem", "sin", "cos", "tan", "asin", "acos", "atan", "atan2", "pow", "sqrt", "hypot", "log",
@@ -16,7 +17,7 @@ pub fn has_math_fn(input: &str) -> bool {
     memchr::memchr_iter(b'(', bytes).any(|paren| MATH_FUNCTIONS.iter().any(|f| bytes[..paren].ends_with(f.as_bytes())))
 }
 
-pub fn is_math_fn(name: &str) -> bool {
+fn is_math_fn(name: &str) -> bool {
     MATH_FUNCTIONS.contains(&name)
 }
 
@@ -62,7 +63,7 @@ pub fn add_whitespace_around_math_operators<'a>(input: &'a str, alloc: &'a Alloc
             b' ' if top && result.last() == Some(&b' ') => {}
             _ if is_op(ch) && top => {
                 let mut end = result.len();
-                while end > 0 && matches!(result[end - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0c) {
+                while end > 0 && CSS_WS.has(result[end - 1]) {
                     end -= 1;
                 }
                 let prev = end.checked_sub(1).map(|p| result[p]);
@@ -94,5 +95,6 @@ pub fn add_whitespace_around_math_operators<'a>(input: &'a str, alloc: &'a Alloc
             _ => result.push(ch),
         }
     }
-    std::str::from_utf8(result.into_bump_slice()).unwrap_or(input)
+    // SAFETY: the bytes are `input`'s with ASCII bytes inserted between them, so they stay UTF-8.
+    unsafe { std::str::from_utf8_unchecked(result.into_bump_slice()) }
 }

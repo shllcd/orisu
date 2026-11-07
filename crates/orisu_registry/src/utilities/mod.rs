@@ -14,36 +14,18 @@ use orisu_candidate::{Candidate, CandidateKind, Modifier, UtilityValue};
 use orisu_parser::infer::{format_js_number, is_multiple_of_quarter, is_positive_integer, js_number};
 use orisu_parser::math::add_whitespace_around_math_operators;
 use orisu_parser::segment::segment;
-use orisu_theme::Theme;
+use orisu_theme::{Inline, Theme};
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 use std::sync::Arc;
 
 type SpacingHandle<'a> = dyn for<'t> Fn(&Cx<'a, 't>, &'a str) -> Option<Nodes<'a>> + Send + Sync + 'a;
 
-/// The declarations a utility sets, computed without building nodes.
-pub type DeclFn<'a> = dyn for<'t> Fn(&Cx<'a, 't>, &'a str, Option<&'a str>) -> Option<Vec<'a, (&'a str, &'a str)>> + Send + Sync + 'a;
-
-/// A candidate-based declaration path for utilities that resolve their own values.
-pub type UtilityDeclFn<'a> = dyn for<'t> Fn(&Cx<'a, 't>, &Candidate<'a>) -> Option<Vec<'a, (&'a str, &'a str)>> + Send + Sync + 'a;
-
-fn declaration_fn<'a>(
-    f: impl for<'t> Fn(&Cx<'a, 't>, &'a str, Option<&'a str>) -> Option<Vec<'a, (&'a str, &'a str)>> + Send + Sync + 'a,
-) -> Arc<DeclFn<'a>> {
-    Arc::new(f)
-}
-
-fn one_declaration<'a>(property: &'a str) -> Arc<DeclFn<'a>> {
-    declaration_fn(move |cx, value, _| Some(Vec::from_iter_in([(property, value)], cx.alloc)))
-}
-
-/// Compile-time context handed to every utility.
 #[derive(Clone, Copy)]
 pub struct Cx<'a, 't> {
     pub theme: &'t Theme<'a>,
     pub alloc: &'a Allocator,
-    /// [`orisu_theme::opts`] flags applied to every theme lookup.
-    pub options: u8,
+    pub inline: Inline,
 }
 
 impl<'a> Cx<'a, '_> {
@@ -79,7 +61,7 @@ impl<'a> Cx<'a, '_> {
 
     #[inline]
     pub fn resolve(&self, value: Option<&str>, keys: &[&str]) -> Option<&'a str> {
-        self.theme.resolve(value, keys, self.options)
+        self.theme.resolve(value, keys, self.inline)
     }
 
     #[inline]
@@ -97,6 +79,12 @@ impl<'a> Cx<'a, '_> {
         Node::AtRule { name: "@property", params: ident, nodes }
     }
 
+    /// `--spacing(value)` for a bare multiple of 0.25 when the theme defines `--spacing`.
+    pub fn spacing(&self, value: &'a str, negative: bool) -> Option<&'a str> {
+        self.resolve(None, &["--spacing"]).filter(|v| !v.is_empty())?;
+        is_multiple_of_quarter(value).then(|| self.cat(&["--spacing(", if negative { "-" } else { "" }, value, ")"]))
+    }
+
     #[inline]
     pub fn negate(&self, value: &'a str) -> &'a str {
         self.cat(&["calc(", value, " * -1)"])
@@ -110,7 +98,7 @@ impl<'a> Cx<'a, '_> {
         self.cat(&["color-mix(in oklab, ", value, " ", alpha, ", transparent)"])
     }
 
-    pub fn replace_alpha(&self, value: &'a str, alpha: &'a str) -> &'a str {
+    fn replace_alpha(&self, value: &'a str, alpha: &'a str) -> &'a str {
         let alpha = js_percent(self, alpha);
         self.cat(&["oklab(from ", value, " l a b / ", alpha, ")"])
     }
@@ -132,15 +120,26 @@ impl<'a> Cx<'a, '_> {
     }
 
     pub fn resolve_theme_color(&self, value: &'a str, modifier: Option<Modifier<'a>>, keys: &[&str]) -> Option<&'a str> {
-        let resolved = match value {
-            "inherit" => Some("inherit"),
-            "transparent" => Some("transparent"),
-            "current" => Some("currentcolor"),
-            _ => self.resolve(Some(value), keys),
+        let resolved = match COLOR_KEYWORDS.iter().find(|(name, _)| *name == value) {
+            Some(&(_, keyword)) => Some(keyword),
+            None => self.resolve(Some(value), keys),
         };
         resolved.filter(|v| !v.is_empty()).and_then(|v| self.as_color(v, modifier))
     }
 }
+
+/// Color names every color utility accepts besides theme colors, with their CSS value.
+const COLOR_KEYWORDS: [(&str, &str); 3] = [("current", "currentcolor"), ("inherit", "inherit"), ("transparent", "transparent")];
+
+const COLOR_KEYWORD_NAMES: [&str; COLOR_KEYWORDS.len()] = {
+    let mut names = [""; COLOR_KEYWORDS.len()];
+    let mut i = 0;
+    while i < names.len() {
+        names[i] = COLOR_KEYWORDS[i].0;
+        i += 1;
+    }
+    names
+};
 
 fn js_percent<'a>(cx: &Cx<'a, '_>, alpha: &'a str) -> &'a str {
     let n = js_number(alpha);
@@ -167,68 +166,26 @@ pub enum Compile<'a> {
 pub struct Utility<'a> {
     pub kind: UtilityKind,
     pub compile: Compile<'a>,
-    pub types: Option<&'a [&'a str]>,
-    /// Set for utilities registered through [`Functional`], so the canonical index can skip compilation.
-    pub functional: Option<Arc<Functional<'a>>>,
-    pub negative: bool,
-    /// Declarations of a utility registered with its own handler, for the canonical index.
-    pub declarations: Option<Arc<UtilityDeclFn<'a>>>,
-}
-
-/// The outcome of the declaration-only path of a utility.
-pub enum Declared<'a> {
-    /// The declarations the utility sets for this candidate.
-    Yes(Vec<'a, (&'a str, &'a str)>),
-    /// The utility does not apply to this candidate.
-    No,
-    /// The utility cannot be described without its handler.
-    Unknown,
 }
 
 impl<'a> Utility<'a> {
-    /// The declarations this utility sets, without compiling it.
-    pub fn declarations(&self, cx: &Cx<'a, '_>, candidate: &Candidate<'a>) -> Declared<'a> {
-        match &self.compile {
-            Compile::Decls(declarations) => Declared::Yes(Vec::from_iter_in(declarations.iter().copied(), cx.alloc)),
-            Compile::Css(body) => match flat_declarations(cx.alloc, body) {
-                Some(declarations) => Declared::Yes(declarations),
-                None => Declared::Unknown,
-            },
-            Compile::CssFunctional(template) => match css_utility::compile(cx, candidate, template) {
-                Some(nodes) => match flat_declarations(cx.alloc, &nodes) {
-                    Some(declarations) => Declared::Yes(declarations),
-                    None => Declared::Unknown,
-                },
-                None => Declared::No,
-            },
-            Compile::Fn(_) => match (&self.functional, &self.declarations) {
-                (Some(functional), _) if functional.has_declarations() => match functional.declarations(cx, candidate, self.negative) {
-                    Some(declarations) => Declared::Yes(declarations),
-                    None => Declared::No,
-                },
-                (None, Some(declarations)) => match declarations(cx, candidate) {
-                    Some(declarations) => Declared::Yes(declarations),
-                    None => Declared::No,
-                },
-                _ => Declared::Unknown,
-            },
-        }
-    }
-
-    #[inline]
-    pub fn is_fallback(&self) -> bool {
-        self.types.is_some_and(|t| t.len() > 1 && t.contains(&"any"))
-    }
-
     #[inline]
     pub fn run(&self, cx: &Cx<'a, '_>, candidate: &Candidate<'a>) -> Option<Nodes<'a>> {
         match &self.compile {
-            Compile::Decls(decls) => Some(Vec::from_iter_in(decls.iter().map(|&(p, v)| cx.decl(p, v)), cx.alloc)),
+            Compile::Decls(decls) => Some(declaration_nodes(cx, decls.iter().copied())),
             Compile::Fn(f) => f(cx, candidate),
             Compile::Css(body) => Some(clone_in(body, cx.alloc)),
             Compile::CssFunctional(template) => css_utility::compile(cx, candidate, template),
         }
     }
+}
+
+pub enum Declared<'a> {
+    Yes(Vec<'a, (&'a str, &'a str)>),
+    /// No utility compiles the candidate.
+    No,
+    /// A utility compiles the candidate to more than declarations, `@property` rules and at-root wrappers.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -251,8 +208,6 @@ pub struct Suggest<'a> {
     pub spacing: bool,
     /// Sets `has_default_value` when the theme defines this key.
     pub default_key: Option<&'a str>,
-    pub literal: Option<String>,
-    pub group: Option<SuggestionGroup>,
 }
 
 impl<'a> Suggest<'a> {
@@ -261,11 +216,7 @@ impl<'a> Suggest<'a> {
     }
 
     pub fn color(keys: &'a [&'a str]) -> Self {
-        Self::values(&["current", "inherit", "transparent"]).keys(keys).modifier_keys(&["--opacity"]).modifiers(&STEPS_OF_5)
-    }
-
-    pub fn literal(value: impl Into<String>) -> Self {
-        Self { literal: Some(value.into()), ..Self::default() }
+        Self::values(&COLOR_KEYWORD_NAMES).keys(keys).modifier_keys(&["--opacity"]).modifiers(&STEPS_OF_5)
     }
 
     pub fn keys(mut self, keys: &'a [&'a str]) -> Self {
@@ -304,11 +255,11 @@ impl<'a> Suggest<'a> {
     }
 }
 
-pub const ONE_TO_12: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
-pub const ONE_TO_13: [&str; 13] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"];
+pub(crate) const ONE_TO_12: [&str; 12] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
+pub(crate) const ONE_TO_13: [&str; 13] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"];
 pub const STEPS_OF_5: [&str; 21] =
     ["0", "5", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55", "60", "65", "70", "75", "80", "85", "90", "95", "100"];
-pub const PERCENT_STEPS_OF_5: [&str; 21] = [
+pub(crate) const PERCENT_STEPS_OF_5: [&str; 21] = [
     "0%", "5%", "10%", "15%", "20%", "25%", "30%", "35%", "40%", "45%", "50%", "55%", "60%", "65%", "70%", "75%", "80%", "85%", "90%",
     "95%", "100%",
 ];
@@ -317,6 +268,13 @@ const SUGGESTED_FRACTIONS: [&str; 26] = [
     "1/2", "1/3", "2/3", "1/4", "2/4", "3/4", "1/5", "2/5", "3/5", "4/5", "1/6", "2/6", "3/6", "4/6", "5/6", "1/12", "2/12", "3/12",
     "4/12", "5/12", "6/12", "7/12", "8/12", "9/12", "10/12", "11/12",
 ];
+
+/// A utility registered from an `@utility` rule, see [`CssUtility::register`].
+#[derive(Clone, Copy)]
+pub struct CssUtilityId<'a> {
+    name: &'a str,
+    index: usize,
+}
 
 #[derive(Default)]
 pub struct Utilities<'a> {
@@ -332,20 +290,19 @@ impl<'a> Utilities<'a> {
         entry.len() - 1
     }
 
-    pub fn body(&self, name: &str, index: usize) -> Option<&Nodes<'a>> {
-        match &self.utilities.get(name)?.get(index)?.compile {
-            Compile::Css(body) | Compile::CssFunctional(CssTemplate { body, .. }) => Some(body),
-            _ => None,
+    pub fn body(&self, id: CssUtilityId<'a>) -> &Nodes<'a> {
+        match &self.utilities[id.name][id.index].compile {
+            Compile::Css(body) | Compile::CssFunctional(CssTemplate { body, .. }) => body,
+            _ => unreachable!("a `CssUtilityId` names a CSS utility"),
         }
     }
 
     /// Swaps in a new body for a CSS utility, returning the old one.
-    pub fn replace_body(&mut self, name: &str, index: usize, body: Nodes<'a>, alloc: &'a Allocator) -> Option<Nodes<'a>> {
-        let compile = &mut self.utilities.get_mut(name)?.get_mut(index)?.compile;
-        match compile {
-            Compile::Css(old) => Some(std::mem::replace(old, body)),
-            Compile::CssFunctional(old) => Some(std::mem::replace(old, CssTemplate::new(body, alloc)).body),
-            _ => None,
+    pub fn replace_body(&mut self, id: CssUtilityId<'a>, body: Nodes<'a>, alloc: &'a Allocator) -> Nodes<'a> {
+        match &mut self.utilities[id.name][id.index].compile {
+            Compile::Css(old) => std::mem::replace(old, body),
+            Compile::CssFunctional(old) => std::mem::replace(old, CssTemplate::new(body, alloc)).body,
+            _ => unreachable!("a `CssUtilityId` names a CSS utility"),
         }
     }
 
@@ -357,6 +314,29 @@ impl<'a> Utilities<'a> {
         self.utilities.get(name).map_or(&[], |u| u.as_slice())
     }
 
+    /// The utilities that may compile `candidate`, in registration order.
+    pub fn matching<'s>(&'s self, candidate: &Candidate<'_>) -> impl Iterator<Item = &'s Utility<'a>> {
+        let (utilities, kind) = match candidate.kind {
+            CandidateKind::Static { root } => (self.get(root), UtilityKind::Static),
+            CandidateKind::Functional { root, .. } => (self.get(root), UtilityKind::Functional),
+            CandidateKind::Arbitrary { .. } => (&[][..], UtilityKind::Static),
+        };
+        utilities.iter().filter(move |utility| utility.kind == kind)
+    }
+
+    /// The declarations `candidate` compiles to, ignoring its variants and `!`.
+    pub fn declarations(&self, cx: &Cx<'a, '_>, candidate: &Candidate<'a>) -> Declared<'a> {
+        let mut out: Option<Vec<'a, (&'a str, &'a str)>> = None;
+        for utility in self.matching(candidate) {
+            let Some(nodes) = utility.run(cx, candidate) else { continue };
+            let Some(declarations) = flat_declarations(cx.alloc, &nodes) else {
+                return Declared::Unknown;
+            };
+            out.get_or_insert_with(|| Vec::new_in(cx.alloc)).extend(declarations);
+        }
+        out.map_or(Declared::No, Declared::Yes)
+    }
+
     pub fn keys(&self, kind: UtilityKind) -> impl Iterator<Item = &'a str> + '_ {
         self.utilities.iter().filter(move |(_, u)| u.iter().any(|u| u.kind == kind)).map(|(k, _)| *k)
     }
@@ -365,12 +345,16 @@ impl<'a> Utilities<'a> {
         self.completions.entry(name).or_default().extend(suggestions);
     }
 
-    pub fn completions(&self, name: &str, theme: &Theme<'a>) -> std::vec::Vec<SuggestionGroup> {
-        self.completions_filtered(name, theme, |_| true)
+    /// Whether [`Utilities::completions`] yields any group for `name`.
+    pub fn has_completions(&self, name: &str) -> bool {
+        match self.completions.get(name) {
+            Some(suggestions) => !suggestions.is_empty(),
+            None => self.has(name, UtilityKind::Static),
+        }
     }
 
-    /// [`Utilities::completions`] with only the modifiers `keep` accepts.
-    pub fn completions_filtered(&self, name: &str, theme: &Theme<'a>, keep: impl Fn(&str) -> bool) -> std::vec::Vec<SuggestionGroup> {
+    /// The suggestion groups of `name`, keeping only the modifiers `keep` accepts.
+    pub fn completions(&self, name: &str, theme: &Theme<'a>, keep: impl Fn(&str) -> bool) -> std::vec::Vec<SuggestionGroup> {
         let Some(suggestions) = self.completions.get(name) else {
             if self.has(name, UtilityKind::Static) {
                 return vec![SuggestionGroup::default()];
@@ -380,16 +364,6 @@ impl<'a> Utilities<'a> {
         let mut groups = vec![];
         let has_spacing = theme.get(&["--spacing"]).is_some_and(|v| !v.is_empty());
         for defn in suggestions {
-            if let Some(group) = &defn.group {
-                let mut group = group.clone();
-                group.modifiers.retain(|modifier| keep(modifier));
-                groups.push(group);
-                continue;
-            }
-            if let Some(literal) = &defn.literal {
-                groups.push(SuggestionGroup { values: vec![Some(literal.clone())], ..Default::default() });
-                continue;
-            }
             let resolve = |keys: &[&str]| -> std::vec::Vec<String> {
                 theme.keys_in_namespaces(keys.iter().copied()).into_iter().map(legacy_numeric_key).collect()
             };
@@ -477,7 +451,6 @@ pub struct Functional<'a> {
     pub handle_bare_value: Option<BareFn<'a>>,
     pub handle_negative_bare_value: Option<BareFn<'a>>,
     pub handle: HandleFn<'a>,
-    pub decl: Option<Arc<DeclFn<'a>>>,
 }
 
 impl<'a> Functional<'a> {
@@ -492,22 +465,11 @@ impl<'a> Functional<'a> {
             handle_bare_value: None,
             handle_negative_bare_value: None,
             handle: Box::new(handle),
-            decl: None,
         }
     }
 
     pub fn decl(property: &'a str) -> Self {
-        Self::new(move |cx, value, _| cx.one(property, value)).declaration(one_declaration(property))
-    }
-
-    /// Sets the declaration-only path the canonical index uses; compilation emits the same pairs.
-    pub fn declaration(mut self, declaration: Arc<DeclFn<'a>>) -> Self {
-        self.decl = Some(declaration);
-        self
-    }
-
-    pub fn has_declarations(&self) -> bool {
-        self.decl.is_some()
+        Self::new(move |cx, value, _| cx.one(property, value))
     }
 
     pub fn negative(mut self) -> Self {
@@ -643,15 +605,6 @@ impl<'a> Functional<'a> {
             Resolved::Value(value, data_type) => (self.handle)(cx, value, data_type),
         }
     }
-
-    /// The declarations this utility sets, without building nodes; `None` when it needs a handler.
-    pub fn declarations(&self, cx: &Cx<'a, '_>, candidate: &Candidate<'a>, negative: bool) -> Option<Vec<'a, (&'a str, &'a str)>> {
-        match self.resolve(cx, candidate, negative)? {
-            Resolved::Declarations(declarations) => Some(Vec::from_iter_in(declarations.iter().copied(), cx.alloc)),
-            Resolved::Nodes(_) => None,
-            Resolved::Value(value, data_type) => (self.decl.as_ref()?)(cx, value, data_type),
-        }
-    }
 }
 
 enum Resolved<'a> {
@@ -682,7 +635,7 @@ pub struct Spacing {
     pub supports_fractions: bool,
 }
 
-pub const DEFAULT_SPACING_SUGGESTIONS: [&str; 34] = [
+const DEFAULT_SPACING_SUGGESTIONS: [&str; 34] = [
     "0", "0.5", "1", "1.5", "2", "2.5", "3", "3.5", "4", "5", "6", "7", "8", "9", "10", "11", "12", "14", "16", "20", "24", "28", "32",
     "36", "40", "44", "48", "52", "56", "60", "64", "72", "80", "96",
 ];
@@ -721,68 +674,17 @@ impl<'a> Registrar<'a, '_> {
     pub fn static_decls(&mut self, name: &str, decls: &[(&str, &str)]) {
         let name = self.alloc.str(name);
         let decls = self.decls(decls);
-        self.utilities.add(
-            name,
-            Utility {
-                kind: UtilityKind::Static,
-                compile: Compile::Decls(decls),
-                types: None,
-                functional: None,
-                negative: false,
-                declarations: None,
-            },
-        );
+        self.utilities.add(name, Utility { kind: UtilityKind::Static, compile: Compile::Decls(decls) });
     }
 
     pub fn static_fn(&mut self, name: &str, f: impl for<'t> Fn(&Cx<'a, 't>, &Candidate<'a>) -> Option<Nodes<'a>> + Send + Sync + 'a) {
         let name = self.alloc.str(name);
-        self.utilities.add(
-            name,
-            Utility {
-                kind: UtilityKind::Static,
-                compile: Compile::Fn(Box::new(f)),
-                types: None,
-                functional: None,
-                negative: false,
-                declarations: None,
-            },
-        );
+        self.utilities.add(name, Utility { kind: UtilityKind::Static, compile: Compile::Fn(Box::new(f)) });
     }
 
     pub fn functional_fn(&mut self, name: &str, f: impl for<'t> Fn(&Cx<'a, 't>, &Candidate<'a>) -> Option<Nodes<'a>> + Send + Sync + 'a) {
         let name = self.alloc.str(name);
-        self.utilities.add(
-            name,
-            Utility {
-                kind: UtilityKind::Functional,
-                compile: Compile::Fn(Box::new(f)),
-                types: None,
-                functional: None,
-                negative: false,
-                declarations: None,
-            },
-        );
-    }
-
-    /// [`Registrar::functional_fn`] with a declaration-only twin used by the canonical index.
-    pub fn functional_decl(
-        &mut self,
-        name: &str,
-        f: impl for<'t> Fn(&Cx<'a, 't>, &Candidate<'a>) -> Option<Nodes<'a>> + Send + Sync + 'a,
-        declarations: impl for<'t> Fn(&Cx<'a, 't>, &Candidate<'a>) -> Option<Vec<'a, (&'a str, &'a str)>> + Send + Sync + 'a,
-    ) {
-        let name = self.alloc.str(name);
-        self.utilities.add(
-            name,
-            Utility {
-                kind: UtilityKind::Functional,
-                compile: Compile::Fn(Box::new(f)),
-                types: None,
-                functional: None,
-                negative: false,
-                declarations: Some(Arc::new(declarations)),
-            },
-        );
+        self.utilities.add(name, Utility { kind: UtilityKind::Functional, compile: Compile::Fn(Box::new(f)) });
     }
 
     pub fn suggest(&mut self, name: &str, suggestions: impl IntoIterator<Item = Suggest<'a>>) {
@@ -791,21 +693,8 @@ impl<'a> Registrar<'a, '_> {
     }
 
     fn add_functional(&mut self, name: &'a str, desc: Arc<Functional<'a>>, negative: bool) {
-        let compile: CompileFn<'a> = {
-            let desc = Arc::clone(&desc);
-            Box::new(move |cx, candidate| desc.compile(cx, candidate, negative))
-        };
-        self.utilities.add(
-            name,
-            Utility {
-                kind: UtilityKind::Functional,
-                compile: Compile::Fn(compile),
-                types: None,
-                functional: Some(desc),
-                negative,
-                declarations: None,
-            },
-        );
+        let compile: CompileFn<'a> = Box::new(move |cx, candidate| desc.compile(cx, candidate, negative));
+        self.utilities.add(name, Utility { kind: UtilityKind::Functional, compile: Compile::Fn(compile) });
     }
 
     pub fn functional(&mut self, name: &str, desc: Functional<'a>) {
@@ -856,40 +745,6 @@ impl<'a> Registrar<'a, '_> {
         self.suggest(name, vec![Suggest::color(keys)]);
     }
 
-    /// [`Registrar::color`] with a declaration-only twin used by the canonical index.
-    pub fn color_decl(
-        &mut self,
-        name: &str,
-        keys: &'a [&'a str],
-        handle: impl for<'t> Fn(&Cx<'a, 't>, &'a str) -> Option<Nodes<'a>> + Send + Sync + 'a,
-        declarations: impl for<'t> Fn(&Cx<'a, 't>, &'a str) -> Vec<'a, (&'a str, &'a str)> + Send + Sync + 'a,
-    ) {
-        self.functional_decl(
-            name,
-            move |cx, c| {
-                let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                    return None;
-                };
-                let value = match value? {
-                    UtilityValue::Arbitrary { value, .. } => cx.as_color(value, modifier),
-                    UtilityValue::Named { value, .. } => cx.resolve_theme_color(value, modifier, keys),
-                }?;
-                handle(cx, value)
-            },
-            move |cx, c| {
-                let CandidateKind::Functional { value, .. } = c.kind else {
-                    return None;
-                };
-                let value = match value? {
-                    UtilityValue::Arbitrary { value, .. } => cx.as_color(value, None),
-                    UtilityValue::Named { value, .. } => cx.resolve_theme_color(value, None, keys),
-                }?;
-                Some(declarations(cx, value))
-            },
-        );
-        self.suggest(name, vec![Suggest::color(keys)]);
-    }
-
     pub fn spacing(
         &mut self,
         name: &str,
@@ -902,27 +757,7 @@ impl<'a> Registrar<'a, '_> {
 
     /// [`Registrar::spacing`] for utilities whose declarations are a single property.
     pub fn spacing_decl(&mut self, name: &str, keys: &'a [&'a str], opts: Spacing, property: &'a str) {
-        self.spacing_with(
-            name,
-            keys,
-            opts,
-            move |cx, value| cx.one(property, value),
-            move |desc| desc.declaration(one_declaration(property)),
-        );
-    }
-
-    /// [`Registrar::spacing`] with a declaration-only twin used by the canonical index.
-    pub fn spacing_declarations(
-        &mut self,
-        name: &str,
-        keys: &'a [&'a str],
-        opts: Spacing,
-        handle: impl for<'t> Fn(&Cx<'a, 't>, &'a str) -> Option<Nodes<'a>> + Send + Sync + 'a,
-        declarations: impl for<'t> Fn(&Cx<'a, 't>, &'a str) -> Vec<'a, (&'a str, &'a str)> + Send + Sync + 'a,
-    ) {
-        self.spacing_with(name, keys, opts, handle, move |desc| {
-            desc.declaration(declaration_fn(move |cx, value, _| Some(declarations(cx, value))))
-        });
+        self.spacing(name, keys, opts, move |cx, value| cx.one(property, value));
     }
 
     pub fn spacing_with(
@@ -943,14 +778,8 @@ impl<'a> Registrar<'a, '_> {
         let mut desc = Functional::new(move |cx, value, _| handle(cx, value))
             .keys(keys)
             .default_value(DefaultValue::Null)
-            .bare(|cx, named| {
-                cx.resolve(None, &["--spacing"]).filter(|v| !v.is_empty())?;
-                is_multiple_of_quarter(named.value).then(|| cx.cat(&["--spacing(", named.value, ")"]))
-            })
-            .negative_bare(|cx, named| {
-                cx.resolve(None, &["--spacing"]).filter(|v| !v.is_empty())?;
-                is_multiple_of_quarter(named.value).then(|| cx.cat(&["--spacing(-", named.value, ")"]))
-            });
+            .bare(|cx, named| cx.spacing(named.value, false))
+            .negative_bare(|cx, named| cx.spacing(named.value, true));
         desc.supports_negative = opts.supports_negative;
         desc.supports_fractions = opts.supports_fractions;
         self.functional(name, configure(desc));

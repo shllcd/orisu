@@ -1,27 +1,26 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use crate::attributify::Attributify;
+use crate::braces::expand_braces;
 use crate::compile::{Entry, compile_candidates, compile_entries, insert_sorted};
 use crate::css_functions::substitute_functions;
 use crate::design_system::{Caches, DesignSystem, ExtensionRef, Session};
 use indexmap::{IndexMap, IndexSet};
 use orisu_allocator::{AllocExt, Allocator, Vec};
-use orisu_ast::{Ctx, Node, Nodes, Scope, Walk, to_css, walk, walk_scoped};
+use orisu_ast::{Ctx, Node, Nodes, Scope, Walk, node_at, node_at_mut, to_css, walk, walk_scoped};
 use orisu_candidate::CandidateKind;
+use orisu_candidate::attributify::Attributify;
 use orisu_diagnostics::{Code, Report, Span};
 use orisu_optimizer::{Splice, SpliceContext, SpliceNodes, fragments, optimize_spliced, polyfills, splice_context};
 use orisu_parser::css as css_parser;
 use orisu_parser::escape::{escape, unescape};
-use orisu_parser::misc::{expand_braces, topological_sort};
 use orisu_parser::segment::segment;
 use orisu_parser::value::{self as vp, ValueNode};
-use orisu_registry::utilities::{CssUtility, is_valid_functional_utility_name, is_valid_static_utility_name};
+use orisu_registry::utilities::{CssUtility, CssUtilityId, is_valid_functional_utility_name, is_valid_static_utility_name};
 use orisu_registry::variants::{Compounds, body_compounds, register_custom_body, register_custom_selectors, substitute_at_variant};
 use orisu_theme::{Theme, UsedVars, opts};
 use rustc_hash::FxBuildHasher;
-
-pub const VERSION: &str = "4.3.4";
+use std::hash::Hash;
 
 pub mod features {
     pub const NONE: u8 = 0;
@@ -62,12 +61,12 @@ pub struct Options<'l, 'a> {
     pub base: &'l str,
     pub polyfills: u8,
     pub load_stylesheet: Option<Box<LoadStylesheet<'l>>>,
-    pub extension: Option<ExtensionRef<'a>>,
+    pub extension: ExtensionRef<'a>,
 }
 
-impl Default for Options<'_, '_> {
-    fn default() -> Self {
-        Self { base: "", polyfills: polyfills::ALL, load_stylesheet: None, extension: None }
+impl<'a> Options<'_, 'a> {
+    pub fn new(extension: ExtensionRef<'a>) -> Self {
+        Self { base: "", polyfills: polyfills::ALL, load_stylesheet: None, extension }
     }
 }
 
@@ -122,20 +121,14 @@ impl From<String> for CompileError {
 
 impl From<Report> for CompileError {
     fn from(report: Report) -> Self {
-        Self { code: report.code(), message: report.message() }
+        Self { code: report.code, message: report.message() }
     }
 }
 
 pub fn compile<'a>(css: &'a str, alloc: &'a Allocator, mut options: Options<'_, 'a>) -> Result<Compiler<'a>, CompileError> {
     let ast = css_parser::parse(css, alloc).map_err(|e| e.to_string())?;
     let parsed = parse_css(ast, alloc, &mut options)?;
-    let Parsed { design_system, caches, mut ast, sources, root, mut utilities_path, features, inline_candidates } = parsed;
-    if let Some(first) = utilities_path.as_mut().and_then(|p| p.first_mut()) {
-        *first += 1;
-    }
-    if let Some(banner) = design_system.extension().and_then(|e| e.banner()) {
-        ast.insert(0, Node::Comment(banner));
-    }
+    let Parsed { design_system, caches, ast, sources, root, utilities_path, features, inline_candidates } = parsed;
     let splice_context = utilities_path.as_deref().and_then(|path| splice_context(&ast, path));
     let mut valid_candidates = IndexSet::default();
     let mut default_did_change = false;
@@ -265,24 +258,6 @@ impl<'a> Compiler<'a> {
     }
 }
 
-fn node_at<'n, 'a>(ast: &'n [Node<'a>], path: &[usize]) -> Option<&'n Node<'a>> {
-    let (&first, rest) = path.split_first()?;
-    let mut node = ast.get(first)?;
-    for &i in rest {
-        node = node.children()?.get(i)?;
-    }
-    Some(node)
-}
-
-fn node_at_mut<'n, 'a>(ast: &'n mut Nodes<'a>, path: &[usize]) -> Option<&'n mut Node<'a>> {
-    let (&first, rest) = path.split_first()?;
-    let mut node = ast.get_mut(first)?;
-    for &i in rest {
-        node = node.children_mut()?.get_mut(i)?;
-    }
-    Some(node)
-}
-
 fn find_path(ast: &[Node<'_>], pred: &impl Fn(&Node<'_>) -> bool, path: &mut std::vec::Vec<usize>) -> bool {
     for (i, node) in ast.iter().enumerate() {
         path.push(i);
@@ -296,8 +271,7 @@ fn find_path(ast: &[Node<'_>], pred: &impl Fn(&Node<'_>) -> bool, path: &mut std
 
 struct CustomUtility<'a> {
     params: &'a str,
-    name: &'a str,
-    index: usize,
+    id: CssUtilityId<'a>,
 }
 
 enum CustomVariant<'a> {
@@ -740,10 +714,7 @@ fn parse_css<'a>(ast: Nodes<'a>, alloc: &'a Allocator, options: &mut Options<'_,
 
     let utilities: std::vec::Vec<CustomUtility<'a>> = css_utilities
         .into_iter()
-        .map(|(params, utility)| {
-            let name = utility.name;
-            CustomUtility { params, name, index: utility.register(&mut ds.utilities, alloc) }
-        })
+        .map(|(params, utility)| CustomUtility { params, id: utility.register(&mut ds.utilities, alloc) })
         .collect();
 
     if let Some(selector) = first_theme_rule {
@@ -797,6 +768,7 @@ fn parse_css<'a>(ast: Nodes<'a>, alloc: &'a Allocator, options: &mut Options<'_,
         })
     })?;
 
+    ast.insert(0, Node::Comment(ds.extension().banner()));
     let utilities_path = utilities_params.and_then(|ptr| {
         let mut path = std::vec::Vec::new();
         let is_marker = |n: &Node<'_>| matches!(n, Node::AtRule { name: "@tailwind", params, .. } if params.as_ptr() == ptr);
@@ -819,11 +791,9 @@ fn with_body<'a, R>(
     utility: &CustomUtility<'a>,
     f: impl FnOnce(&mut Nodes<'a>, &mut Session<'_, 'a>) -> Result<R, String>,
 ) -> Result<R, String> {
-    let Some(mut body) = ds.utilities.replace_body(utility.name, utility.index, Vec::new_in(alloc), alloc) else {
-        return f(&mut Vec::new_in(alloc), &mut Session::new(ds, alloc, caches));
-    };
+    let mut body = ds.utilities.replace_body(utility.id, Vec::new_in(alloc), alloc);
     let result = f(&mut body, &mut Session::new(ds, alloc, caches));
-    ds.utilities.replace_body(utility.name, utility.index, body, alloc);
+    ds.utilities.replace_body(utility.id, body, alloc);
     result
 }
 
@@ -868,7 +838,7 @@ fn circular_variants_error(path: &[&str], start: &str, alloc: &Allocator) -> Str
 
 struct Imports<'l, 'o, 'a> {
     load: &'l mut Option<Box<LoadStylesheet<'o>>>,
-    extension: Option<ExtensionRef<'a>>,
+    extension: ExtensionRef<'a>,
     alloc: &'a Allocator,
 }
 
@@ -899,7 +869,7 @@ fn substitute_at_imports<'a>(
         if chain.len() > 100 {
             return Err(format!("Exceeded maximum recursion depth while resolving `{uri}` in `{base}`").into());
         }
-        let (content, loaded_base, path) = match (imports.extension.and_then(|e| e.stylesheet(uri)), imports.load.as_mut()) {
+        let (content, loaded_base, path) = match (imports.extension.stylesheet(uri), imports.load.as_mut()) {
             (Some(content), _) => (content, base, uri.to_owned()),
             (None, Some(loader)) => {
                 let loaded = loader(uri, base)?;
@@ -940,6 +910,11 @@ struct Import<'a> {
     layer: Option<&'a str>,
     media: Option<&'a str>,
     supports: Option<&'a str>,
+}
+
+/// The URI of an `@import` with these params, or `None` when the compiler wouldn't inline it.
+pub fn import_uri<'a>(params: &'a str, alloc: &'a Allocator) -> Option<&'a str> {
+    parse_import_params(&vp::parse(params, alloc), alloc).ok().flatten().map(|import| import.uri)
 }
 
 fn parse_import_params<'a>(params: &[ValueNode<'a>], alloc: &'a Allocator) -> Result<Option<Import<'a>>, String> {
@@ -1069,8 +1044,7 @@ impl<'a> ApplySort<'_, 'a> {
     }
 
     fn body<'d>(&self, node: usize, ds: &'d DesignSystem<'a>) -> &'d [Node<'a>] {
-        let utility = &self.utilities[node];
-        ds.utilities.body(utility.name, utility.index).map_or(&[], |b| b.as_slice())
+        ds.utilities.body(self.utilities[node].id)
     }
 
     fn print(&self, node: usize, ds: &Session<'_, 'a>) -> String {
@@ -1088,8 +1062,7 @@ fn substitute_at_apply<'a>(
 ) -> Result<bool, String> {
     let mut session = Session::new(ds, alloc, caches);
     let design_system = session.ds;
-    let empty = Vec::new_in(alloc);
-    let body = |u: &CustomUtility<'a>| design_system.utilities.body(u.name, u.index).unwrap_or(&empty);
+    let body = |u: &CustomUtility<'a>| design_system.utilities.body(u.id);
     let mut sort = ApplySort {
         utilities,
         dependencies: utilities.iter().map(|u| apply_dependencies(body(u), &mut session)).collect(),
@@ -1252,4 +1225,42 @@ fn apply_error(candidate: &str, ds: &mut Session<'_, '_>) -> String {
         );
     }
     format!("Cannot apply unknown utility class `{candidate}`")
+}
+
+fn topological_sort<K: Clone + Eq + Hash>(graph: &IndexMap<K, IndexSet<K>>, mut on_cycle: impl FnMut(&[K], &K)) -> std::vec::Vec<K> {
+    let mut seen = IndexSet::new();
+    let mut wip = IndexSet::new();
+    let mut sorted = std::vec::Vec::new();
+    let mut path = std::vec::Vec::new();
+    fn visit<K: Clone + Eq + Hash>(
+        node: &K,
+        graph: &IndexMap<K, IndexSet<K>>,
+        seen: &mut IndexSet<K>,
+        wip: &mut IndexSet<K>,
+        sorted: &mut std::vec::Vec<K>,
+        path: &mut std::vec::Vec<K>,
+        on_cycle: &mut dyn FnMut(&[K], &K),
+    ) {
+        let Some(deps) = graph.get(node) else { return };
+        if seen.contains(node) {
+            return;
+        }
+        if wip.contains(node) {
+            on_cycle(path, node);
+            return;
+        }
+        wip.insert(node.clone());
+        for dep in deps {
+            path.push(node.clone());
+            visit(dep, graph, seen, wip, sorted, path, on_cycle);
+            path.pop();
+        }
+        seen.insert(node.clone());
+        wip.swap_remove(node);
+        sorted.push(node.clone());
+    }
+    for node in graph.keys() {
+        visit(node, graph, &mut seen, &mut wip, &mut sorted, &mut path, &mut on_cycle);
+    }
+    sorted
 }

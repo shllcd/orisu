@@ -4,6 +4,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { formatOptions } from "./args.ts";
 import { parseArgs } from "node:util";
 import { compile, type Compiler } from "./index.ts";
 
@@ -63,11 +64,7 @@ const helpMessage = () => {
     "  orisu canonicalize --stream [--css input.css]",
   ];
   out.push("", "Options:");
-  for (const [name, option] of Object.entries(OPTIONS)) {
-    const flag = ("short" in option ? `-${option.short}, ` : "    ") + `--${name}`;
-    const fallback = "default" in option ? ` [default: ${option.default}]` : "";
-    out.push(`  ${flag.padEnd(16)}···· ${option.description}${fallback}`);
-  }
+  out.push(...formatOptions(OPTIONS));
   return out.join("\n");
 };
 

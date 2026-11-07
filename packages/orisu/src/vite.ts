@@ -17,10 +17,12 @@ import {
   normalizePath,
   optimize,
   Scanner,
+  scanSources,
   type Compiler,
   type MangledModule,
   type ManglePlan,
 } from "./index.ts";
+import { fillPlaceholders } from "./native.ts";
 import { encodeMergeTable } from "./table.ts";
 
 interface LintedFile {
@@ -41,7 +43,6 @@ const ROOT_WAIT_MS = 2000;
 const DIAGNOSTICS_DEBOUNCE_MS = 100;
 const SOURCE_FILE_RE = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|mdx)(?:$|\?)/;
 const SCRIPT_FILE_RE = /\.[cm]?[jt]sx?$/;
-const PLACEHOLDER_RE = /__orisu-((?:[0-9a-f]{2})+)__/g;
 const MANGLE_PLAN_FILE = "mangle.json";
 
 export type PluginOptions = {
@@ -65,9 +66,9 @@ export type MangleOptions = {
   keep?: (string | RegExp)[];
   /** Starts every short name, so they cannot equal classes of other stylesheets on the page. */
   prefix?: string;
-  /** Functions whose arguments are class lists, besides `cn`, `clsx`, `cx`, `classnames`, `twMerge` and `twJoin`. */
+  /** Functions whose arguments are class lists, besides `cn`, `clsx` and the like. */
   classFunctions?: string[];
-  /** Attributes and properties whose values are class lists, besides `class`, `className` and `*ClassName`. */
+  /** Attributes and properties whose values are class lists, besides `class`, `className`, `*ClassName` and framework forms like `:class` and `[ngClass]`. */
   classAttributes?: string[];
 };
 
@@ -168,7 +169,10 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
     if (savedPlan === undefined) {
       try {
         savedPlan = loadManglePlan(readFileSync(planPath(), "utf8"));
-      } catch {
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw new Error(`orisu: cannot read the mangle plan \`${planPath()}\`; delete it and build again`, { cause: error });
+        }
         savedPlan = null;
       }
     }
@@ -347,9 +351,7 @@ export default function orisu(opts: PluginOptions = {}): Plugin[] {
             if (error) this.error(error);
           }
         }
-        if (!code.includes("__orisu-")) return;
-        if (!plan) return { code: code.replace(PLACEHOLDER_RE, (_, hex: string) => Buffer.from(hex, "hex").toString("utf8")), map: null };
-        const filled = plan.fill(code, chunk.fileName);
+        const filled = plan ? plan.fill(code, chunk.fileName) : fillPlaceholders(code, chunk.fileName);
         if (filled) return { code: filled.code, map: filled.map };
       },
 
@@ -573,11 +575,8 @@ class Root {
       });
       await Promise.all(dependencies);
 
-      const root = this.compiler.root;
-      const sources =
-        root === "none" ? [] : root === null ? [{ base: this.base, pattern: "**/*", negated: false }] : [{ ...root, negated: false }];
       this.scanner = new Scanner({
-        sources: sources.concat(this.compiler.sources),
+        sources: scanSources(this.compiler, this.base),
         attributify: this.compiler.attributify,
         cache: this.cacheDir,
       });
@@ -615,7 +614,9 @@ class Root {
     let mtime: number | null = null;
     try {
       mtime = (await fs.stat(file)).mtimeMs;
-    } catch {}
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     this.buildDependencies.set(file, mtime);
   }
 

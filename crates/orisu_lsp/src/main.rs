@@ -1,6 +1,6 @@
 fn main() {
     if std::env::args().any(|arg| arg == "--version") {
-        println!("orisu-lsp {}", env!("CARGO_PKG_VERSION"));
+        println!("orisu-lsp {}", orisu_lsp::version());
         return;
     }
     if let Err(error) = orisu_lsp::run() {

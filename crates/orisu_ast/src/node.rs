@@ -70,12 +70,6 @@ impl<'a> Builder<'a> {
         v
     }
 
-    pub fn vec_from(self, nodes: impl IntoIterator<Item = Node<'a>>) -> Nodes<'a> {
-        let mut v = Vec::new_in(self.alloc);
-        v.extend(nodes);
-        v
-    }
-
     #[inline]
     pub fn decl(self, property: &'a str, value: &'a str) -> Node<'a> {
         Node::Decl { property, value: Some(value), important: false }
@@ -146,6 +140,34 @@ pub fn clone_in<'a: 's, 's>(nodes: &[Node<'a>], alloc: &'s Allocator) -> Nodes<'
     let mut out = Vec::with_capacity_in(nodes.len(), alloc);
     out.extend(nodes.iter().map(|node| node.clone_in(alloc)));
     out
+}
+
+/// The node at `path`, a list of child indices starting in `nodes`; `None` for an empty path.
+pub fn node_at<'n, 'a>(nodes: &'n [Node<'a>], path: &[usize]) -> Option<&'n Node<'a>> {
+    let (&first, rest) = path.split_first()?;
+    let mut node = nodes.get(first)?;
+    for &i in rest {
+        node = node.children()?.get(i)?;
+    }
+    Some(node)
+}
+
+/// [`node_at`] for mutation.
+pub fn node_at_mut<'n, 'a>(nodes: &'n mut [Node<'a>], path: &[usize]) -> Option<&'n mut Node<'a>> {
+    let (&first, rest) = path.split_first()?;
+    let mut node = nodes.get_mut(first)?;
+    for &i in rest {
+        node = node.children_mut()?.get_mut(i)?;
+    }
+    Some(node)
+}
+
+/// The children of the node at `path`, or `nodes` itself for an empty path.
+pub fn children_at_mut<'n, 'a>(nodes: &'n mut Nodes<'a>, path: &[usize]) -> Option<&'n mut Nodes<'a>> {
+    match path {
+        [] => Some(nodes),
+        _ => node_at_mut(nodes, path)?.children_mut(),
+    }
 }
 
 pub fn walk<'a>(ast: &[Node<'a>], f: &mut impl FnMut(&Node<'a>) -> bool) {

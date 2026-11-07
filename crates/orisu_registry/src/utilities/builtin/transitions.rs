@@ -3,6 +3,7 @@ use crate::utilities::{Cx, DefaultValue, Functional, Registrar, Suggest};
 use orisu_ast::{Node, Nodes};
 use orisu_candidate::{CandidateKind, UtilityValue};
 use orisu_parser::infer::is_positive_integer;
+use orisu_theme::Inline;
 
 const DEFAULT_TRANSITION_PROPERTY: &str = "color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events";
 
@@ -39,9 +40,9 @@ fn leading<'a>(cx: &Cx<'a, '_>, value: &'a str) -> Option<Nodes<'a>> {
 }
 
 pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
-    let ease = r.theme.resolve(None, &["--default-transition-timing-function"], 0).unwrap_or("ease");
+    let ease = r.theme.resolve(None, &["--default-transition-timing-function"], Inline::AsDeclared).unwrap_or("ease");
     let ease = r.cat(&["var(--tw-ease, ", ease, ")"]);
-    let duration = r.theme.resolve(None, &["--default-transition-duration"], 0).unwrap_or("0s");
+    let duration = r.theme.resolve(None, &["--default-transition-duration"], Inline::AsDeclared).unwrap_or("0s");
     let duration = r.cat(&["var(--tw-duration, ", duration, ")"]);
     let timed = |property: &'a str| -> [(&'a str, &'a str); 3] {
         [("transition-property", property), ("transition-timing-function", ease), ("transition-duration", duration)]

@@ -1,7 +1,7 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use crate::attributify::retarget;
+use crate::attributify::{resolve, retarget};
 use crate::design_system::{DesignSystem, Session};
 use orisu_allocator::{AllocExt, Allocator, ArenaString, Vec};
 use orisu_ast::{Node, Nodes};
@@ -10,16 +10,10 @@ use orisu_optimizer::Fragment;
 use orisu_parser::compare::compare;
 use orisu_parser::escape::{escape, escape_into};
 use orisu_registry::property_order::property_order;
-use orisu_registry::utilities::UtilityKind;
 use orisu_registry::variants::{VariantKey, apply_variant};
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
-
-pub mod flags {
-    pub const NONE: u8 = 0;
-    pub const RESPECT_IMPORTANT: u8 = 1 << 0;
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PropertySort<'a> {
@@ -110,7 +104,7 @@ pub fn compile_entries<'a, 's>(
             on_invalid(raw);
             continue;
         }
-        let attribute = ds.attributify.and_then(|attributify| attributify.resolve(raw));
+        let attribute = ds.attributify.as_ref().and_then(|attributify| resolve(attributify, raw));
         let (raw, candidates, target) = match attribute {
             Some((utility, selector)) => {
                 let candidates = ds.parse_candidate(&utility).1;
@@ -130,13 +124,11 @@ pub fn compile_entries<'a, 's>(
         matches.push((raw, candidates, target));
     }
 
-    let flags = if respect_important { flags::RESPECT_IMPORTANT } else { flags::NONE };
-
     let mut entries = std::vec::Vec::new();
     for (raw, candidates, target) in matches {
         let mut found = false;
         for candidate in candidates {
-            let rules = ds.compile_ast_nodes(candidate, flags);
+            let rules = ds.compile_ast_nodes(candidate, respect_important);
             if rules.is_empty() {
                 continue;
             }
@@ -158,7 +150,7 @@ pub fn compile_entries<'a, 's>(
 }
 
 /// Merges `fresh`, already in output order, into `entries` as if both had been sorted together with `fresh` last.
-pub fn insert_sorted<'a>(entries: &mut std::vec::Vec<Entry<'a>>, fresh: std::vec::Vec<Entry<'a>>, ds: &DesignSystem<'a>) {
+pub(crate) fn insert_sorted<'a>(entries: &mut std::vec::Vec<Entry<'a>>, fresh: std::vec::Vec<Entry<'a>>, ds: &DesignSystem<'a>) {
     if entries.is_empty() {
         *entries = fresh;
         return;
@@ -188,12 +180,16 @@ fn compare_sorting<'a>(ds: &DesignSystem<'a>, a: &NodeSorting<'a>, z: &NodeSorti
         .then_with(|| compare(a.candidate, z.candidate))
 }
 
-pub fn compile_ast_nodes<'a>(candidate: &Candidate<'a>, ds: &Session<'_, 'a>, flags: u8) -> std::vec::Vec<CompiledRule<'a>> {
+pub(crate) fn compile_ast_nodes<'a>(
+    candidate: &Candidate<'a>,
+    ds: &Session<'_, 'a>,
+    respect_important: bool,
+) -> std::vec::Vec<CompiledRule<'a>> {
     let asts = compile_base_utility(candidate, ds);
     if asts.is_empty() {
         return std::vec::Vec::new();
     }
-    let respect_important = ds.important && flags & flags::RESPECT_IMPORTANT != 0;
+    let respect_important = ds.important && respect_important;
     let mut selector = ArenaString::with_capacity_in(candidate.raw.len() + 1, ds.alloc);
     selector.push('.');
     escape_into(candidate.raw, &mut selector);
@@ -220,33 +216,13 @@ pub fn compile_ast_nodes<'a>(candidate: &Candidate<'a>, ds: &Session<'_, 'a>, fl
 fn compile_base_utility<'a>(candidate: &Candidate<'a>, ds: &Session<'_, 'a>) -> SmallVec<[Nodes<'a>; 1]> {
     let mut asts = SmallVec::new();
     let cx = ds.cx();
-    let (root, kind) = match candidate.kind {
-        CandidateKind::Arbitrary { property, value, modifier } => {
-            let Some(value) = cx.as_color(value, modifier) else {
-                return asts;
-            };
+    if let CandidateKind::Arbitrary { property, value, modifier } = candidate.kind {
+        if let Some(value) = cx.as_color(value, modifier) {
             asts.push(cx.nodes([cx.decl(property, value)]));
-            return asts;
         }
-        CandidateKind::Static { root } => (root, UtilityKind::Static),
-        CandidateKind::Functional { root, .. } => (root, UtilityKind::Functional),
-    };
-    let utilities = ds.utilities.get(root);
-    for fallback in [false, true] {
-        for utility in utilities {
-            if utility.kind != kind || utility.is_fallback() != fallback {
-                continue;
-            }
-            match utility.run(&ds.cx(), candidate) {
-                Some(nodes) => asts.push(nodes),
-                None if utility.types.is_some_and(|t| !t.is_empty()) => return asts,
-                None => {}
-            }
-        }
-        if !asts.is_empty() {
-            return asts;
-        }
+        return asts;
     }
+    asts.extend(ds.utilities.matching(candidate).filter_map(|utility| utility.run(&cx, candidate)));
     asts
 }
 
@@ -260,7 +236,7 @@ fn apply_important(ast: &mut [Node<'_>]) {
     }
 }
 
-pub fn property_sort<'a>(nodes: &[Node<'_>], alloc: &'a Allocator) -> PropertySort<'a> {
+fn property_sort<'a>(nodes: &[Node<'_>], alloc: &'a Allocator) -> PropertySort<'a> {
     let mut order: SmallVec<[u16; 8]> = SmallVec::new();
     let mut count = 0;
     let mut queue: VecDeque<&Node<'_>> = nodes.iter().collect();

@@ -29,7 +29,7 @@ impl Compounds {
     pub const STYLE_RULES: Self = Self(2);
 
     #[inline]
-    pub fn intersects(self, other: Self) -> bool {
+    fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
 }
@@ -43,7 +43,7 @@ impl BitOr for Compounds {
     }
 }
 
-pub fn compounds_for_selectors<'s>(selectors: impl IntoIterator<Item = &'s str>) -> Compounds {
+fn compounds_for_selectors<'s>(selectors: impl IntoIterator<Item = &'s str>) -> Compounds {
     let mut compounds = Compounds::NEVER;
     for sel in selectors {
         if sel.starts_with('@') {
@@ -112,12 +112,22 @@ impl<'a> Apply<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct VariantKey<'a>(SmallVec<[(u32, &'a Variant<'a>); 2]>);
 
+/// Parsing and nesting rules of a compound variant.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompoundRules {
+    /// Rejects an inner variant that expands to more than one rule.
+    pub single_child: bool,
+    /// `root/modifier-x` parses as `root-[x/modifier]`: the modifier belongs to the inner variant.
+    pub modifier_in_value: bool,
+}
+
 pub struct VariantEntry<'a> {
     pub kind: VariantKind,
     pub order: u32,
     pub apply: Apply<'a>,
     pub compounds_with: Compounds,
     pub compounds: Compounds,
+    pub rules: CompoundRules,
 }
 
 #[derive(Default)]
@@ -139,7 +149,7 @@ impl<'a> Variants<'a> {
         self.set(name, VariantKind::Static, Apply::Fn(Box::new(apply)), Compounds::NEVER, compounds);
     }
 
-    pub fn static_data(&mut self, name: &'a str, compounds: Compounds, apply: Apply<'a>) {
+    pub(crate) fn static_data(&mut self, name: &'a str, compounds: Compounds, apply: Apply<'a>) {
         self.set(name, VariantKind::Static, apply, Compounds::NEVER, compounds);
     }
 
@@ -156,9 +166,13 @@ impl<'a> Variants<'a> {
         &mut self,
         name: &'a str,
         compounds_with: Compounds,
+        rules: CompoundRules,
         apply: impl for<'t> Fn(&Cx<'a, 't>, &mut Node<'a>, &Variant<'a>) -> Option<()> + Send + Sync + 'a,
     ) {
         self.set(name, VariantKind::Compound, Apply::Fn(Box::new(apply)), compounds_with, Compounds::STYLE_RULES);
+        if let Some(entry) = self.entries.get_mut(name) {
+            entry.rules = rules;
+        }
     }
 
     /// Variants registered inside `f` share one order slot, ordered among themselves by `compare`.
@@ -216,7 +230,7 @@ impl<'a> Variants<'a> {
         self.compounds_with_compounds(parent, child)
     }
 
-    pub fn compounds_with_name(&self, parent: &str, child: &str) -> bool {
+    fn compounds_with_name(&self, parent: &str, child: &str) -> bool {
         self.entries.get(child).is_some_and(|c| self.compounds_with_compounds(parent, c.compounds))
     }
 
@@ -332,6 +346,7 @@ impl<'a> Variants<'a> {
         a.0.cmp(&z.0).then_with(|| self.compare(theme, Some(a.1), Some(z.1)))
     }
 
+    /// Re-registering a name keeps its order, `compounds_with` and rules, as Tailwind's `Variants.set` does.
     fn set(&mut self, name: &'a str, kind: VariantKind, apply: Apply<'a>, compounds_with: Compounds, compounds: Compounds) {
         if let Some(existing) = self.entries.get_mut(name) {
             existing.kind = kind;
@@ -340,7 +355,8 @@ impl<'a> Variants<'a> {
             return;
         }
         self.last_order = self.next_order();
-        self.entries.insert(name, VariantEntry { kind, order: self.last_order, apply, compounds_with, compounds });
+        self.entries
+            .insert(name, VariantEntry { kind, order: self.last_order, apply, compounds_with, compounds, rules: CompoundRules::default() });
     }
 
     #[inline]
@@ -393,7 +409,7 @@ pub fn apply_variant<'a>(cx: &Cx<'a, '_>, node: &mut Node<'a>, variant: &Variant
             let mut isolated = Node::AtRule { name: "@slot", params: "", nodes: Vec::new_in(cx.alloc) };
             apply_variant(cx, &mut isolated, inner, variants, depth + 1)?;
             let mut children = std::mem::replace(body(&mut isolated)?, Vec::new_in(cx.alloc));
-            if root == "not" && children.len() > 1 {
+            if entry.rules.single_child && children.len() > 1 {
                 return None;
             }
             for child in children.iter_mut() {
@@ -461,7 +477,7 @@ pub fn register_custom_body<'a>(v: &mut Variants<'a>, name: &'a str, body: Nodes
     v.static_data(name, compounds, Apply::Body(body.into_bump_slice(), scoped));
 }
 
-pub fn substitute_at_slot<'a>(ast: &mut Nodes<'a>, nodes: &Nodes<'a>, alloc: &'a Allocator) {
+fn substitute_at_slot<'a>(ast: &mut Nodes<'a>, nodes: &Nodes<'a>, alloc: &'a Allocator) {
     let _ = walk_scoped(ast, Scope::default(), &mut |node, _| {
         Ok::<_, ()>(match node {
             Node::AtRule { name: "@slot", .. } => Walk::ReplaceSkip(clone_in(nodes, alloc)),
@@ -546,7 +562,13 @@ fn static_variant<'a>(v: &mut Variants<'a>, alloc: &'a Allocator, name: &'a str,
     static_variant_with(v, alloc, name, selectors, compounds_for_selectors(selectors.iter().copied()));
 }
 
-pub fn static_variant_with<'a>(v: &mut Variants<'a>, alloc: &'a Allocator, name: &'a str, selectors: &[&'a str], compounds: Compounds) {
+pub(crate) fn static_variant_with<'a>(
+    v: &mut Variants<'a>,
+    alloc: &'a Allocator,
+    name: &'a str,
+    selectors: &[&'a str],
+    compounds: Compounds,
+) {
     let wrappers = alloc.alloc_slice_fill_iter(selectors.iter().map(|s| Wrapper::parse(s, alloc)));
     v.static_data(name, compounds, Apply::Wrap(wrappers));
 }
@@ -857,7 +879,7 @@ fn container_query<'a>(cx: &Cx<'a, '_>, node: &mut Node<'a>, variant: &Variant<'
 }
 
 fn group_like<'a>(v: &mut Variants<'a>, name: &'a str, class: &'a str, combinator: &'static str) {
-    v.compound(name, Compounds::STYLE_RULES, move |cx, node, variant| {
+    v.compound(name, Compounds::STYLE_RULES, CompoundRules::default(), move |cx, node, variant| {
         if is_relative(variant) {
             return None;
         }
@@ -881,24 +903,29 @@ pub fn register_builtin<'a>(v: &mut Variants<'a>, theme: &Theme<'a>, alloc: &'a 
     static_variant_with(v, alloc, "*", &[":is(& > *)"], Compounds::NEVER);
     static_variant_with(v, alloc, "**", &[":is(& *)"], Compounds::NEVER);
 
-    v.compound("not", Compounds::STYLE_RULES | Compounds::AT_RULES, |cx, node, variant| {
-        if is_relative(variant) || compound_modifier(variant).is_some() {
-            return None;
-        }
-        let mut negate = Negate { alloc: cx.alloc, root: &*node, replacement: None, did_apply: false, stopped: false };
-        negate.visit(negate.root, &mut SmallVec::new());
-        let did_apply = negate.did_apply;
-        if let Some(replacement) = negate.replacement {
-            *node = replacement;
-        }
-        if let Node::Rule { selector: "&", nodes } = node
-            && nodes.len() == 1
-            && let Some(child) = nodes.pop()
-        {
-            *node = child;
-        }
-        did_apply.then_some(())
-    });
+    v.compound(
+        "not",
+        Compounds::STYLE_RULES | Compounds::AT_RULES,
+        CompoundRules { single_child: true, modifier_in_value: true },
+        |cx, node, variant| {
+            if is_relative(variant) || compound_modifier(variant).is_some() {
+                return None;
+            }
+            let mut negate = Negate { alloc: cx.alloc, root: &*node, replacement: None, did_apply: false, stopped: false };
+            negate.visit(negate.root, &mut SmallVec::new());
+            let did_apply = negate.did_apply;
+            if let Some(replacement) = negate.replacement {
+                *node = replacement;
+            }
+            if let Node::Rule { selector: "&", nodes } = node
+                && nodes.len() == 1
+                && let Some(child) = nodes.pop()
+            {
+                *node = child;
+            }
+            did_apply.then_some(())
+        },
+    );
     v.suggest("not", VariantValues::Compounds);
 
     group_like(v, "group", "group", " ");
@@ -964,19 +991,24 @@ pub fn register_builtin<'a>(v: &mut Variants<'a>, theme: &Theme<'a>, alloc: &'a 
         static_variant(v, alloc, name, &[selector]);
     }
 
-    v.compound("in", Compounds::STYLE_RULES, |cx, node, variant| {
+    v.compound("in", Compounds::STYLE_RULES, CompoundRules { modifier_in_value: true, ..CompoundRules::default() }, |cx, node, variant| {
         if compound_modifier(variant).is_some() {
             return None;
         }
         rewrite_variant(node, |selector| cx.cat(&[":where(", &selector.replace('&', "*"), ") &"]))
     });
     v.suggest("in", VariantValues::Compounds);
-    v.compound("has", Compounds::STYLE_RULES, |cx, node, variant| {
-        if compound_modifier(variant).is_some() {
-            return None;
-        }
-        rewrite_variant(node, |selector| cx.cat(&["&:has(", &selector.replace('&', "*"), ")"]))
-    });
+    v.compound(
+        "has",
+        Compounds::STYLE_RULES,
+        CompoundRules { modifier_in_value: true, ..CompoundRules::default() },
+        |cx, node, variant| {
+            if compound_modifier(variant).is_some() {
+                return None;
+            }
+            rewrite_variant(node, |selector| cx.cat(&["&:has(", &selector.replace('&', "*"), ")"]))
+        },
+    );
     v.suggest("has", VariantValues::Compounds);
 
     v.functional("aria", Compounds::STYLE_RULES, |cx, node, variant| {

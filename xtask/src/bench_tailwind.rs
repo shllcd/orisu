@@ -3,30 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::bench::{count, git};
+use crate::harness::{bytes, count, duration, install, per_iteration, root, shadcn, si};
 
 const USAGE: &str = "usage: cargo xtask bench-tailwind [--entry <app.css> --root <dir>] [--runs N] [scenario...]";
-
-const SHADCN: &str = "https://github.com/shadcn-ui/ui.git";
-const SHADCN_REV: &str = "e31626978fe8e3804fe2e792e11e32dc560e40a8";
-
-const DEPENDENCIES: &str = r#"{
-  "private": true,
-  "dependencies": {
-    "@tailwindcss/language-server": "0.16.0",
-    "@tailwindcss/node": "4.3.4",
-    "@tailwindcss/oxide": "4.3.4",
-    "clsx": "2.1.1",
-    "cn": "0.2.6",
-    "esbuild": "0.28.2",
-    "shadcn": "4.22.1",
-    "streamdown": "2.7.0",
-    "tailwind-merge": "3.7.0",
-    "tailwindcss": "4.3.4",
-    "tw-animate-css": "1.4.0"
-  }
-}
-"#;
 
 /// Scenario, iterations per measured run, and whether Tailwind has a counterpart.
 const SCENARIOS: &[(&str, u64, bool)] = &[
@@ -75,7 +54,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             _ => return Err(USAGE.to_owned()),
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace root");
+    let root = root();
     let work = root.join("target/bench-tailwind");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let modules = install(&work.join("deps"))?;
@@ -95,9 +74,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Err(format!("{} is missing: run `npm run build` in {}", dist.display(), package.display()));
     }
 
-    let config =
-        format!("{{\"entry\":{},\"root\":{},\"modules\":{},\"orisu\":{}}}", json(&entry), json(&project), json(&modules), json(&dist));
-    fs::write(work.join("config.json"), config).map_err(|e| e.to_string())?;
+    let path = |path: &Path| path.to_string_lossy().into_owned();
+    let config = serde_json::json!({ "entry": path(&entry), "root": path(&project), "modules": path(&modules), "orisu": path(&dist) });
+    fs::write(work.join("config.json"), config.to_string()).map_err(|e| e.to_string())?;
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("bench-tailwind.mjs");
     let status = Command::new("node").arg(&script).arg(&work).arg("prepare").status().map_err(|e| e.to_string())?;
     if !status.success() {
@@ -159,113 +138,32 @@ pub fn run(args: &[String]) -> Result<(), String> {
 /// after setup and all iterations, each the minimum over `runs`.
 fn measure(script: &Path, work: &Path, engine: &str, scenario: &str, k: u64, runs: usize) -> Result<Sample, String> {
     let iterations = k.to_string();
-    let mut setup = u64::MAX;
-    let mut full = u64::MAX;
     let mut ms = f64::INFINITY;
     let mut rss = u64::MAX;
     let mut heap = i64::MAX;
-    for mode in ["0", "1"] {
-        for _ in 0..runs {
-            let args = [
-                OsStr::new("--expose-gc"),
-                script.as_os_str(),
-                work.as_os_str(),
-                OsStr::new(engine),
-                OsStr::new(scenario),
-                OsStr::new(&iterations),
-                OsStr::new(mode),
-            ];
-            let (instructions, stdout) = count(OsStr::new("node"), &args)?;
-            if mode == "0" {
-                setup = setup.min(instructions);
-            } else {
-                full = full.min(instructions);
-                let malformed = || format!("{engine} {scenario}: expected `ms rss heap`, got {stdout:?}");
-                let mut fields = stdout.split_whitespace();
-                ms = ms.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
-                rss = rss.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
-                heap = heap.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
-            }
+    let instructions = per_iteration(k, runs, |mode| {
+        let args = [
+            OsStr::new("--expose-gc"),
+            script.as_os_str(),
+            work.as_os_str(),
+            OsStr::new(engine),
+            OsStr::new(scenario),
+            OsStr::new(&iterations),
+            OsStr::new(mode),
+        ];
+        let (counted, stdout) = count(OsStr::new("node"), &args)?;
+        if mode == "1" {
+            let malformed = || format!("{engine} {scenario}: expected `ms rss heap`, got {stdout:?}");
+            let mut fields = stdout.split_whitespace();
+            ms = ms.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
+            rss = rss.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
+            heap = heap.min(fields.next().and_then(|n| n.parse().ok()).ok_or_else(malformed)?);
         }
-    }
-    Ok(Sample { instructions: full.saturating_sub(setup) as f64 / k as f64, ms: ms / k as f64, rss, heap })
-}
-
-/// Installs the pinned Tailwind toolchain and the shadcn docs' CSS dependencies into `deps`, returning its `node_modules`.
-pub(crate) fn install(deps: &Path) -> Result<PathBuf, String> {
-    let manifest = deps.join("package.json");
-    let modules = deps.join("node_modules");
-    if fs::read_to_string(&manifest).ok().as_deref() == Some(DEPENDENCIES) && modules.exists() {
-        return Ok(modules);
-    }
-    fs::create_dir_all(deps).map_err(|e| e.to_string())?;
-    fs::write(&manifest, DEPENDENCIES).map_err(|e| e.to_string())?;
-    let status = Command::new("npm")
-        .args(["install", "--no-audit", "--no-fund", "--loglevel=error"])
-        .current_dir(deps)
-        .status()
-        .map_err(|e| e.to_string())?;
-    if !status.success() {
-        return Err("npm install failed".to_owned());
-    }
-    Ok(modules)
-}
-
-/// The shadcn docs app at `SHADCN_REV`, sparsely checked out into `work`, with `modules` linked as its `node_modules`.
-pub(crate) fn shadcn(work: &Path, modules: &Path) -> Result<(PathBuf, PathBuf), String> {
-    let repo = work.join("shadcn");
-    let app = repo.join("apps/v4");
-    if !app.exists() {
-        fs::create_dir_all(&repo).map_err(|e| e.to_string())?;
-        git(&repo, &["init", "--quiet"])?;
-        git(&repo, &["remote", "add", "origin", SHADCN])?;
-        git(&repo, &["sparse-checkout", "set", "apps/v4"])?;
-        git(&repo, &["fetch", "--quiet", "--depth", "1", "origin", SHADCN_REV])?;
-        git(&repo, &["checkout", "--quiet", "FETCH_HEAD"])?;
-    }
-    let link = app.join("node_modules");
-    if fs::read_link(&link).ok().as_deref() != Some(modules) {
-        let _ = fs::remove_file(&link);
-        symlink(modules, &link).map_err(|e| format!("{}: {e}", link.display()))?;
-    }
-    Ok((app.join("app/globals.css"), app))
-}
-
-#[cfg(unix)]
-fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(windows)]
-fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::windows::fs::symlink_dir(target, link)
+        Ok(counted.instructions)
+    })?;
+    Ok(Sample { instructions, ms: ms / k.max(1) as f64, rss, heap })
 }
 
 fn canonical(path: &str) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))
-}
-
-fn json(path: &Path) -> String {
-    format!("\"{}\"", path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\""))
-}
-
-pub(crate) fn duration(ms: f64) -> String {
-    if ms >= 1.0 { format!("{ms:.1} ms") } else { format!("{:.2} µs", ms * 1e3) }
-}
-
-pub(crate) fn bytes(n: f64) -> String {
-    match n.abs() {
-        a if a >= 1048576.0 => format!("{:.1} MB", n / 1048576.0),
-        a if a >= 1024.0 => format!("{:.1} KB", n / 1024.0),
-        _ => format!("{n:.0} B"),
-    }
-}
-
-pub(crate) fn si(n: f64) -> String {
-    match n {
-        n if n >= 1e9 => format!("{:.2}G", n / 1e9),
-        n if n >= 1e6 => format!("{:.1}M", n / 1e6),
-        n if n >= 1e3 => format!("{:.1}k", n / 1e3),
-        n => format!("{n:.0}"),
-    }
 }

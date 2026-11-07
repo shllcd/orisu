@@ -71,8 +71,7 @@ fn compile_one(dir: &Path, name: &str) -> (String, std::vec::Vec<(&'static str, 
     let candidates = read("txt");
     let alloc = Allocator::new();
     let base = dir.to_string_lossy().into_owned();
-    let options =
-        Options { base: &base, load_stylesheet: Some(Box::new(load_stylesheet)), extension: Some(&Tailwind), ..Options::default() };
+    let options = Options { base: &base, load_stylesheet: Some(Box::new(load_stylesheet)), ..Options::new(&Tailwind) };
     let mut compiler = match compile(&css, &alloc, options) {
         Ok(compiler) => compiler,
         Err(error) => return (format!("error: {error}"), std::vec::Vec::new()),

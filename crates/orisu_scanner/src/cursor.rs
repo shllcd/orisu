@@ -1,5 +1,3 @@
-use std::{ascii::escape_default, fmt::Display};
-
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor<'a> {
     pub input: &'a [u8],
@@ -48,28 +46,5 @@ impl<'a> Cursor<'a> {
 
     pub fn move_to(&mut self, pos: usize) {
         self.pos = pos.min(self.input.len());
-    }
-}
-
-impl Display for Cursor<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let len = self.input.len().to_string();
-
-        let pos = format!("{: >len_count$}", self.pos, len_count = len.len());
-        write!(f, "{}/{} ", pos, len)?;
-
-        if self.pos == 0 {
-            write!(f, "S ")?;
-        } else if self.pos + 1 >= self.input.len() {
-            write!(f, "E ")?;
-        } else {
-            write!(f, "M ")?;
-        }
-
-        fn to_str(c: u8) -> String {
-            if c == 0x00 { "NUL".into() } else { format!("{:?}", escape_default(c).to_string()) }
-        }
-
-        write!(f, "[{} {} {}]", to_str(self.prev()), to_str(self.curr()), to_str(self.next()))
     }
 }

@@ -3,9 +3,9 @@
 
 use indexmap::IndexMap;
 use orisu_allocator::AllocExt;
+use orisu_canonical::{key_path_to_css_property, to_key_path};
 use orisu_compiler::design_system::{DesignSystem, Session};
 use orisu_parser::escape::unescape;
-use orisu_parser::segment::segment;
 use orisu_theme::{UsedVars, opts};
 use rustc_hash::FxBuildHasher;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
@@ -108,31 +108,6 @@ const EXTEND: &[(&str, &str)] = &[
 
 const DEFAULT_TRANSITIONS: &[(&str, &str)] =
     &[("transitionDuration", "--default-transition-duration"), ("transitionTimingFunction", "--default-transition-timing-function")];
-
-const SPECIAL_DEFAULT_KEYS: &[(&str, &str)] = &[
-    ("borderWidth", "border-width"),
-    ("outlineWidth", "outline-width"),
-    ("ringColor", "ring-color"),
-    ("ringWidth", "ring-width"),
-    ("transitionDuration", "transition-duration"),
-    ("transitionTimingFunction", "transition-timing-function"),
-];
-
-const OLD_TO_NEW_NAMESPACE: &[(&str, &str)] = &[
-    ("animation", "animate"),
-    ("aspectRatio", "aspect"),
-    ("borderRadius", "radius"),
-    ("boxShadow", "shadow"),
-    ("colors", "color"),
-    ("containers", "container"),
-    ("fontFamily", "font"),
-    ("fontSize", "text"),
-    ("letterSpacing", "tracking"),
-    ("lineHeight", "leading"),
-    ("maxWidth", "container"),
-    ("screens", "breakpoint"),
-    ("transitionTimingFunction", "ease"),
-];
 
 const CSS_VALUES: &str = "__CSS_VALUES__";
 
@@ -464,75 +439,6 @@ fn merge_extension(a: Option<&Value>, b: &Value) -> Option<Value> {
         return Some(b.clone());
     }
     None
-}
-
-/// `a.b[c.d]` → `["a", "b", "c.d"]`.
-fn to_key_path(path: &str) -> Vec<String> {
-    let mut keys = Vec::new();
-    for part in segment(path, b'.') {
-        if !part.contains('[') {
-            keys.push(part.to_owned());
-            continue;
-        }
-        let mut at = 0;
-        while let Some(open) = part[at..].find('[').map(|i| at + i)
-            && let Some(close) = part[open..].find(']').map(|i| open + i)
-        {
-            if open > at {
-                keys.push(part[at..open].to_owned());
-            }
-            keys.push(part[open + 1..close].to_owned());
-            at = close + 1;
-        }
-        if at < part.len() {
-            keys.push(part[at..].to_owned());
-        }
-    }
-    keys
-}
-
-/// `["fontSize", "xs", "1", "lineHeight"]` → `text-xs--line-height`, or `None` when it has no CSS variable.
-fn key_path_to_css_property(path: &[String]) -> Option<String> {
-    let first = path.first()?;
-    if let Some(special) = lookup(SPECIAL_DEFAULT_KEYS, first)
-        && path.get(1).is_some_and(|p| p == "DEFAULT")
-    {
-        return Some(format!("default-{special}"));
-    }
-    if first == "container" {
-        return None;
-    }
-    let valid = |part: &String| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_%/.".contains(&b));
-    if !path.iter().all(valid) {
-        return None;
-    }
-    let last = path.len() - 1;
-    let mut parts = Vec::with_capacity(path.len());
-    for (i, part) in path.iter().enumerate() {
-        let part = if i == 0 { lookup(OLD_TO_NEW_NAMESPACE, part).unwrap_or(part) } else { part };
-        if part == "DEFAULT" && i == last {
-            continue;
-        }
-        let part = if part == "1" && i != last { "" } else { part };
-        let part = part.replace('.', "_");
-        parts.push(if i == 0 || part.starts_with('-') || part == "lineHeight" { kebab(&part) } else { part });
-    }
-    Some(parts.join("-"))
-}
-
-fn kebab(part: &str) -> String {
-    let mut out = String::with_capacity(part.len() + 4);
-    let mut chars = part.chars().peekable();
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if c.is_ascii_lowercase()
-            && let Some(next) = chars.next_if(char::is_ascii_uppercase)
-        {
-            out.push('-');
-            out.push(next.to_ascii_lowercase());
-        }
-    }
-    out
 }
 
 fn camelize(sub: &str) -> String {

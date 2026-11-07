@@ -9,6 +9,7 @@ use orisu_ast::bytes::trim;
 use orisu_parser::compare::dimension;
 use orisu_parser::segment::segment;
 use orisu_parser::value::{self as vp, ValueNode};
+use orisu_theme::Inline;
 
 #[inline]
 pub fn has_theme_function(value: &str) -> bool {
@@ -112,7 +113,7 @@ fn spacing<'a>(ds: &Session<'_, 'a>, value: &str, rest: &[&str]) -> Result<&'a s
     if !rest.is_empty() {
         return Err(format!("The --spacing(…) function only accepts a single argument, but received {}.", rest.len() + 1));
     }
-    let Some(multiplier) = ds.theme.resolve(None, &["--spacing"], 0).filter(|v| !v.is_empty()) else {
+    let Some(multiplier) = ds.theme.resolve(None, &["--spacing"], Inline::AsDeclared).filter(|v| !v.is_empty()) else {
         return Err("The --spacing(…) function requires that the `--spacing` theme variable exists, but it was not found.".into());
     };
     match dimension(value) {
@@ -127,8 +128,8 @@ fn theme<'a>(ds: &Session<'_, 'a>, in_at_rule: bool, path: &str, fallback: &[&st
         return Err("The --theme(…) function can only be used with CSS variables from your theme.".into());
     }
     let (path, inline) = match path.strip_suffix(" inline") {
-        Some(path) => (path, true),
-        None => (path, in_at_rule),
+        Some(path) => (path, Inline::Always),
+        None => (path, if in_at_rule { Inline::Always } else { Inline::AsDeclared }),
     };
     let Some(resolved) = ds.resolve_theme_value(path, inline).filter(|v| !v.is_empty()) else {
         if !fallback.is_empty() {
@@ -174,7 +175,7 @@ fn inject_fallback<'a>(ast: &mut [ValueNode<'a>], fallback: &'a str, ds: &Sessio
 
 fn legacy_theme<'a>(ds: &Session<'_, 'a>, path: &str, fallback: &[&str]) -> Result<&'a str, String> {
     let path = unquote(path);
-    match ds.resolve_theme_value(&path, true).filter(|v| !v.is_empty()) {
+    match ds.resolve_theme_value(&path, Inline::Always).filter(|v| !v.is_empty()) {
         Some(resolved) => Ok(resolved),
         None if !fallback.is_empty() => Ok(ds.alloc.str(&fallback.join(", "))),
         None => Err(format!(

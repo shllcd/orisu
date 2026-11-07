@@ -40,11 +40,6 @@ impl<'a, T> Vec<'a, T> {
     }
 
     #[inline]
-    pub fn into_bump_slice_mut(self) -> &'a mut [T] {
-        ManuallyDrop::into_inner(self.0).into_bump_slice_mut()
-    }
-
-    #[inline]
     pub fn push(&mut self, value: T) {
         self.0.push(value);
     }
@@ -90,11 +85,6 @@ impl<'a, T> Vec<'a, T> {
     }
 
     #[inline]
-    pub fn capacity(&self) -> usize {
-        self.0.capacity()
-    }
-
-    #[inline]
     pub fn retain(&mut self, f: impl FnMut(&T) -> bool) {
         self.0.retain(f);
     }
@@ -122,11 +112,6 @@ impl<'a, T> Vec<'a, T> {
     #[inline]
     pub fn splice<I: IntoIterator<Item = T>>(&mut self, range: impl RangeBounds<usize>, with: I) {
         self.0.splice(range, with);
-    }
-
-    #[inline]
-    pub fn split_off(&mut self, at: usize) -> Self {
-        Self(ManuallyDrop::new(self.0.split_off(at)))
     }
 
     #[inline]

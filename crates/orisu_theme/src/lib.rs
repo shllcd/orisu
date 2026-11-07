@@ -7,15 +7,27 @@ use orisu_ast::Node;
 use orisu_parser::escape::{escape_into, unescape};
 use rustc_hash::FxBuildHasher;
 
+/// Tailwind's `ThemeOptions` bits, stored per value and exposed numerically to JS configs.
 pub mod opts {
     pub const NONE: u8 = 0;
     pub const INLINE: u8 = 1 << 0;
     pub const REFERENCE: u8 = 1 << 1;
     pub const DEFAULT: u8 = 1 << 2;
     pub const STATIC: u8 = 1 << 3;
+    /// Never stored; [`super::Theme::get_options`] adds it for variables the output references.
     pub const USED: u8 = 1 << 4;
-    /// Resolution flag: treats `@theme inline` values as plain `@theme` values.
-    pub const IGNORE_INLINE: u8 = 1 << 5;
+}
+
+/// Whether a lookup returns a value itself or a `var()` reference to it; a query mode over the stored [`opts::INLINE`] bit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Inline {
+    /// Inline only `@theme inline` values.
+    #[default]
+    AsDeclared,
+    /// Inline every value, as `theme()` does.
+    Always,
+    /// Treat `@theme inline` values as plain `@theme` values.
+    Never,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -23,6 +35,18 @@ pub struct ThemeValue<'a> {
     pub value: &'a str,
     pub options: u8,
     var_ref: &'a str,
+}
+
+impl<'a> ThemeValue<'a> {
+    #[inline]
+    fn resolved(&self, inline: Inline) -> &'a str {
+        let inlined = match inline {
+            Inline::AsDeclared => self.options & opts::INLINE != 0,
+            Inline::Always => true,
+            Inline::Never => false,
+        };
+        if inlined { self.value } else { self.var_ref }
+    }
 }
 
 /// Theme variables referenced by the output so far, by theme index. Only grows within one compiler.
@@ -89,14 +113,14 @@ pub fn is_ignored_theme_key(key: &str, namespace: &str) -> bool {
     ignored_for(namespace).iter().any(|ignored| key.strip_prefix(ignored).is_some_and(|rest| rest.is_empty() || rest.starts_with('-')))
 }
 
-pub struct KeyBuf {
+struct KeyBuf {
     stack: [u8; 128],
     len: usize,
     heap: Option<String>,
 }
 
 impl KeyBuf {
-    pub fn new(parts: &[&str]) -> Self {
+    fn new(parts: &[&str]) -> Self {
         let total: usize = parts.iter().map(|p| p.len()).sum();
         let mut buf = Self { stack: [0; 128], len: 0, heap: None };
         if total <= buf.stack.len() {
@@ -110,10 +134,11 @@ impl KeyBuf {
         buf
     }
 
-    pub fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         match &self.heap {
             Some(s) => s,
-            None => std::str::from_utf8(&self.stack[..self.len]).unwrap_or(""),
+            // SAFETY: `new` fills the stack with whole `&str` parts only.
+            None => unsafe { std::str::from_utf8_unchecked(&self.stack[..self.len]) },
         }
     }
 }
@@ -218,7 +243,7 @@ impl<'a> Theme<'a> {
     pub fn index_of(&self, key: &str) -> Option<usize> {
         match self.prefix {
             Some(p) if !p.is_empty() => {
-                let rest = key.get(3 + p.len()..).unwrap_or("");
+                let rest = key.strip_prefix("--")?.strip_prefix(p)?.strip_prefix('-')?;
                 let k = KeyBuf::new(&["--", rest]);
                 self.values.get_index_of(unescape(k.as_str()).as_ref())
             }
@@ -237,11 +262,6 @@ impl<'a> Theme<'a> {
 
     pub fn entries<'s>(&'s self, alloc: &'a Allocator) -> impl Iterator<Item = (&'a str, &'s ThemeValue<'a>)> {
         self.values.iter().map(move |(k, v)| (self.prefix_key(k, alloc), v))
-    }
-
-    /// Entries keyed without the prefix, as Tailwind stores them.
-    pub fn raw_entries(&self) -> impl Iterator<Item = (&'a str, &ThemeValue<'a>)> {
-        self.values.iter().map(|(k, v)| (*k, v))
     }
 
     pub fn prefix_key<'b>(&self, key: &'b str, alloc: &'b Allocator) -> &'b str {
@@ -283,17 +303,8 @@ impl<'a> Theme<'a> {
         None
     }
 
-    #[inline]
-    fn is_inline(value: &ThemeValue<'a>, options: u8) -> bool {
-        value.options & opts::INLINE != 0 && options & opts::IGNORE_INLINE == 0
-    }
-
-    pub fn resolve(&self, candidate_value: Option<&str>, keys: &[&str], options: u8) -> Option<&'a str> {
-        let (_, value) = self.resolve_key(candidate_value, keys)?;
-        if options & opts::INLINE != 0 || Self::is_inline(value, options) {
-            return Some(value.value);
-        }
-        Some(value.var_ref)
+    pub fn resolve(&self, candidate_value: Option<&str>, keys: &[&str], inline: Inline) -> Option<&'a str> {
+        self.resolve_key(candidate_value, keys).map(|(_, v)| v.resolved(inline))
     }
 
     pub fn resolve_value(&self, candidate_value: Option<&str>, keys: &[&str]) -> Option<&'a str> {
@@ -305,7 +316,7 @@ impl<'a> Theme<'a> {
         candidate_value: &str,
         keys: &[&str],
         nested: &[&'n str],
-        options: u8,
+        inline: Inline,
     ) -> Option<(&'a str, NestedValues<'a, 'n>)> {
         let (key, value) = self.resolve_key(Some(candidate_value), keys)?;
         let mut extra = smallvec::SmallVec::new();
@@ -314,11 +325,9 @@ impl<'a> Theme<'a> {
             let Some(v) = self.values.get(k.as_str()) else {
                 continue;
             };
-            let resolved = if Self::is_inline(v, options) { v.value } else { v.var_ref };
-            extra.push((*name, resolved));
+            extra.push((*name, v.resolved(inline)));
         }
-        let resolved = if Self::is_inline(value, options) { value.value } else { value.var_ref };
-        Some((resolved, extra))
+        Some((value.resolved(inline), extra))
     }
 
     pub fn namespace(&self, namespace: &str) -> std::vec::Vec<(Option<&'a str>, &'a str)> {
@@ -364,9 +373,7 @@ fn prefix_key<'a>(prefix: Option<&str>, key: &'a str, alloc: &'a Allocator) -> &
 fn var_ref<'a>(prefix: Option<&str>, key: &'a str, value: &'a str, options: u8, alloc: &'a Allocator) -> &'a str {
     let mut out = ArenaString::new_in(alloc);
     out.push_str("var(");
-    let mut name = String::new();
-    escape_into(prefix_key(prefix, key, alloc), &mut name);
-    out.push_str(&name);
+    escape_into(prefix_key(prefix, key, alloc), &mut out);
     if options & opts::REFERENCE != 0 && !value.is_empty() {
         out.push_str(", ");
         out.push_str(value);

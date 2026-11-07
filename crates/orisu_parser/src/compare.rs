@@ -1,6 +1,7 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
+use crate::infer::match_mantissa;
 use std::cmp::Ordering;
 
 pub fn compare(a: &str, z: &str) -> Ordering {
@@ -95,11 +96,9 @@ pub fn compare_breakpoints(a: &str, z: &str, direction: Direction) -> Ordering {
     if ab != zb {
         return ab.cmp(&zb);
     }
-    let order = match direction {
-        Direction::Asc => parse_float(a).zip(parse_float(z)).and_then(|(x, y)| (x - y).partial_cmp(&0.0)),
-        Direction::Desc => parse_float(a).zip(parse_float(z)).and_then(|(x, y)| (y - x).partial_cmp(&0.0)),
-    };
+    let order = parse_float(a).zip(parse_float(z)).and_then(|(x, y)| (x - y).partial_cmp(&0.0));
     match order {
+        Some(order) if direction == Direction::Desc => order.reverse(),
         Some(order) => order,
         None => {
             if a < z {
@@ -112,22 +111,8 @@ pub fn compare_breakpoints(a: &str, z: &str, direction: Direction) -> Ordering {
 }
 
 pub fn dimension(input: &str) -> Option<(f64, Option<&str>)> {
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    if matches!(bytes.first(), Some(b'-' | b'+')) {
-        i = 1;
-    }
-    let num_start = i;
-    while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-        i += 1;
-    }
-    let num = &input[..i];
-    let digits = &input[num_start..i];
-    let dots = digits.bytes().filter(|b| *b == b'.').count();
-    if digits.is_empty() || dots > 1 || digits.ends_with('.') {
-        return None;
-    }
-    let unit = &input[i..];
+    let end = match_mantissa(input.as_bytes())?;
+    let (num, unit) = input.split_at(end);
     if !unit.is_empty() && unit != "%" && !unit.bytes().all(|b| b.is_ascii_alphabetic()) {
         return None;
     }

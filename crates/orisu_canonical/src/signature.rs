@@ -251,7 +251,7 @@ impl<'a> Canon<'a, '_> {
     /// The normalized value and the theme variables inlined into it.
     fn normalize_value(&mut self, value: &str, alloc: &Allocator) -> (String, Box<str>) {
         let sig = self.sig_key();
-        let inline = self.ds.options & orisu_theme::opts::IGNORE_INLINE != 0;
+        let inline = self.ds.inline();
         if let Some(normalized) = self.storage.normalized_values.get(&ValueKey { sig, inline, value }) {
             return normalized.clone();
         }
@@ -303,7 +303,7 @@ impl<'a> Canon<'a, '_> {
                     Some(unprefixed) => Cow::Owned(format!("--{unprefixed}")),
                     None => Cow::Borrowed(raw),
                 };
-                let resolved = self.ds.resolve_theme_value(&variable, true);
+                let resolved = self.ds.resolve_theme_value(&variable, orisu_theme::Inline::Always);
                 let variable = variable.into_owned();
                 if seen.insert(variable.clone())
                     && let Some(resolved) = resolved

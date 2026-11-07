@@ -35,14 +35,20 @@ pub fn convert_underscores<'a>(input: &'a str, skip_underscore_to_space: bool, a
         out.push(if ch == b'_' && !skip_underscore_to_space { b' ' } else { ch });
         i += 1;
     }
-    std::str::from_utf8(out.into_bump_slice()).unwrap_or(input)
+    // SAFETY: the bytes are `input`'s with ASCII bytes replaced by ASCII bytes, so they stay UTF-8.
+    unsafe { std::str::from_utf8_unchecked(out.into_bump_slice()) }
+}
+
+/// Whether a function named `name` takes a URL, whose underscores stay as written.
+pub fn is_url_fn(name: &str) -> bool {
+    name == "url" || name.ends_with("_url")
 }
 
 fn decode_nodes<'a>(ast: &mut [ValueNode<'a>], alloc: &'a Allocator) {
     for node in ast {
         match node {
             ValueNode::Function(name, nodes) => {
-                if *name == "url" || name.ends_with("_url") {
+                if is_url_fn(name) {
                     *name = convert_underscores(name, false, alloc);
                     continue;
                 }

@@ -1,12 +1,9 @@
 use super::{arbitrary_type, bare_px, push_alpha_replaced_shadow};
 use crate::utilities::{Cx, Functional, Registrar, STEPS_OF_5, Suggest};
-use orisu_allocator::ArenaString;
 use orisu_allocator::Vec;
-use orisu_ast::{Node, Nodes, bytes::trim};
+use orisu_ast::{Node, Nodes};
 use orisu_candidate::{CandidateKind, Modifier, UtilityValue};
 use orisu_parser::infer::{DataType, is_multiple_of_quarter, is_positive_integer};
-use orisu_parser::segment::segment;
-use orisu_parser::shadow::replace_shadow_colors;
 
 const BOX_SHADOW_VALUE: &str =
     "var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow)";
@@ -66,117 +63,56 @@ struct Shadow {
     arbitrary_prefix: &'static str,
 }
 
-fn shadow_value<'a>(cx: &Cx<'a, '_>, value: &'a str, prefix: &str, color_var: &str) -> &'a str {
-    let replaced = replace_shadow_colors(value, cx.alloc, &mut |color| cx.cat(&["var(", color_var, ", ", color, ")"]));
-    if prefix.is_empty() {
-        return replaced;
-    }
-    let prefix = trim(prefix);
-    let mut out = ArenaString::new_in(cx.alloc);
-    for (i, part) in segment(replaced, b',').into_iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(prefix);
-        out.push(' ');
-        out.push_str(trim(part));
-    }
-    out.into_bump_str()
-}
-
 fn shadow<'a>(r: &mut Registrar<'a, '_>, s: Shadow) {
     r.static_fn(&format!("{}-initial", s.name), move |cx, _| Some(cx.nodes([(s.properties)(cx), cx.decl(s.color_var, "initial")])));
-    r.functional_decl(
-        s.name,
-        move |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+    r.functional_fn(s.name, move |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        let alpha = shadow_alpha(cx, modifier);
+        let shadows = |value: &'a str, prefix: &str| {
+            if modifier.is_some() && alpha.is_none() {
                 return None;
-            };
-            let alpha = shadow_alpha(cx, modifier);
-            let shadows = |value: &'a str, prefix: &str| {
-                if modifier.is_some() && alpha.is_none() {
-                    return None;
+            }
+            let mut nodes = Vec::with_capacity_in(5, cx.alloc);
+            nodes.push((s.properties)(cx));
+            nodes.push(cx.decl_opt(s.alpha_var, alpha));
+            push_alpha_replaced_shadow(cx, &mut nodes, s.target, value, alpha, s.color_var, prefix);
+            if s.box_shadow {
+                nodes.push(cx.decl("box-shadow", BOX_SHADOW_VALUE));
+            }
+            Some(nodes)
+        };
+        let colored = |color: &'a str| Some(cx.nodes([(s.properties)(cx), cx.decl(s.color_var, color)]));
+        let value = match value {
+            None => return shadows(cx.theme.get(&[s.theme_key])?, ""),
+            Some(UtilityValue::Arbitrary { data_type, value }) => {
+                if arbitrary_type(data_type, value, &[DataType::Color]) == Some("color") {
+                    return colored(cx.with_alpha(cx.as_color(value, modifier)?, s.alpha_ref));
                 }
-                let mut nodes = Vec::with_capacity_in(5, cx.alloc);
+                return shadows(value, s.arbitrary_prefix);
+            }
+            Some(UtilityValue::Named { value, .. }) => value,
+        };
+        match value {
+            "none" if modifier.is_none() => {
+                let mut nodes = Vec::with_capacity_in(3, cx.alloc);
                 nodes.push((s.properties)(cx));
-                nodes.push(cx.decl_opt(s.alpha_var, alpha));
-                push_alpha_replaced_shadow(cx, &mut nodes, s.target, value, alpha, s.color_var, prefix);
+                nodes.push(cx.decl(s.target, s.none));
                 if s.box_shadow {
                     nodes.push(cx.decl("box-shadow", BOX_SHADOW_VALUE));
                 }
-                Some(nodes)
-            };
-            let colored = |color: &'a str| Some(cx.nodes([(s.properties)(cx), cx.decl(s.color_var, color)]));
-            let value = match value {
-                None => return shadows(cx.theme.get(&[s.theme_key])?, ""),
-                Some(UtilityValue::Arbitrary { data_type, value }) => {
-                    if arbitrary_type(data_type, value, &[DataType::Color]) == Some("color") {
-                        return colored(cx.with_alpha(cx.as_color(value, modifier)?, s.alpha_ref));
-                    }
-                    return shadows(value, s.arbitrary_prefix);
-                }
-                Some(UtilityValue::Named { value, .. }) => value,
-            };
-            match value {
-                "none" if modifier.is_none() => {
-                    let mut nodes = Vec::with_capacity_in(3, cx.alloc);
-                    nodes.push((s.properties)(cx));
-                    nodes.push(cx.decl(s.target, s.none));
-                    if s.box_shadow {
-                        nodes.push(cx.decl("box-shadow", BOX_SHADOW_VALUE));
-                    }
-                    return Some(nodes);
-                }
-                "inherit" if modifier.is_none() => return colored("inherit"),
-                "none" | "inherit" => return None,
-                _ => {}
+                return Some(nodes);
             }
-            if let Some(v) = cx.theme.get(&[&format!("{}-{value}", s.theme_key)]).filter(|v| !v.is_empty()) {
-                return shadows(v, "");
-            }
-            colored(cx.with_alpha(cx.resolve_theme_color(value, modifier, s.color_keys)?, s.alpha_ref))
-        },
-        move |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            let colored = |cx: &Cx<'a, '_>, color: &'a str| Some(Vec::from_iter_in([(s.color_var, color)], cx.alloc));
-            let shadows = |cx: &Cx<'a, '_>, value: &'a str, prefix: &str| {
-                let mut out = Vec::with_capacity_in(2, cx.alloc);
-                out.push((s.target, shadow_value(cx, value, prefix, s.color_var)));
-                if s.box_shadow {
-                    out.push(("box-shadow", BOX_SHADOW_VALUE));
-                }
-                Some(out)
-            };
-            match value {
-                None => shadows(cx, cx.theme.get(&[s.theme_key])?, ""),
-                Some(UtilityValue::Arbitrary { data_type, value }) => {
-                    if arbitrary_type(data_type, value, &[DataType::Color]) == Some("color") {
-                        return colored(cx, cx.with_alpha(cx.as_color(value, None)?, s.alpha_ref));
-                    }
-                    shadows(cx, value, s.arbitrary_prefix)
-                }
-                Some(UtilityValue::Named { value, .. }) => match value {
-                    "none" => {
-                        let mut out = Vec::with_capacity_in(2, cx.alloc);
-                        out.push((s.target, s.none));
-                        if s.box_shadow {
-                            out.push(("box-shadow", BOX_SHADOW_VALUE));
-                        }
-                        Some(out)
-                    }
-                    "inherit" => colored(cx, "inherit"),
-                    _ => {
-                        if let Some(v) = cx.theme.get(&[&format!("{}-{value}", s.theme_key)]).filter(|v| !v.is_empty()) {
-                            return shadows(cx, v, "");
-                        }
-                        colored(cx, cx.with_alpha(cx.resolve_theme_color(value, None, s.color_keys)?, s.alpha_ref))
-                    }
-                },
-            }
-        },
-    );
+            "inherit" if modifier.is_none() => return colored("inherit"),
+            "none" | "inherit" => return None,
+            _ => {}
+        }
+        if let Some(v) = cx.theme.get(&[&format!("{}-{value}", s.theme_key)]).filter(|v| !v.is_empty()) {
+            return shadows(v, "");
+        }
+        colored(cx.with_alpha(cx.resolve_theme_color(value, modifier, s.color_keys)?, s.alpha_ref))
+    });
     let theme_keys = r.keys(&[s.theme_key]);
     r.suggest(
         s.name,
@@ -197,81 +133,48 @@ fn ring<'a>(
     head: &'static str,
     tail: &'a str,
 ) {
-    r.functional_decl(
-        name,
-        move |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+    r.functional_fn(name, move |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        let width = |v: &'a str| {
+            Some(cx.nodes([
+                box_shadow_properties(cx),
+                cx.decl(shadow_var, cx.cat(&[head, v, tail])),
+                cx.decl("box-shadow", BOX_SHADOW_VALUE),
+            ]))
+        };
+        let Some(value) = value else {
+            if modifier.is_some() {
                 return None;
-            };
-            let width = |v: &'a str| {
-                Some(cx.nodes([
-                    box_shadow_properties(cx),
-                    cx.decl(shadow_var, cx.cat(&[head, v, tail])),
-                    cx.decl("box-shadow", BOX_SHADOW_VALUE),
-                ]))
-            };
-            let Some(value) = value else {
-                if modifier.is_some() {
-                    return None;
-                }
-                return width(default_width);
-            };
-            match value {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    if arbitrary_type(data_type, value, &[DataType::Color, DataType::Length]) == Some("length") {
-                        if modifier.is_some() {
-                            return None;
-                        }
-                        return width(value);
-                    }
-                    cx.one(color_var, cx.as_color(value, modifier)?)
-                }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(v) = cx.resolve_theme_color(value, modifier, &["--ring-color", "--color"]) {
-                        return cx.one(color_var, v);
-                    }
+            }
+            return width(default_width);
+        };
+        match value {
+            UtilityValue::Arbitrary { data_type, value } => {
+                if arbitrary_type(data_type, value, &[DataType::Color, DataType::Length]) == Some("length") {
                     if modifier.is_some() {
                         return None;
                     }
-                    let v = cx
-                        .resolve(Some(value), &["--ring-width"])
-                        .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])))
-                        .filter(|v| !v.is_empty())?;
-                    width(v)
+                    return width(value);
                 }
+                cx.one(color_var, cx.as_color(value, modifier)?)
             }
-        },
-        move |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            let width = |cx: &Cx<'a, '_>, v: &'a str| {
-                Some(Vec::from_iter_in([(shadow_var, cx.cat(&[head, v, tail])), ("box-shadow", BOX_SHADOW_VALUE)], cx.alloc))
-            };
-            let Some(value) = value else {
-                return width(cx, default_width);
-            };
-            match value {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    if arbitrary_type(data_type, value, &[DataType::Color, DataType::Length]) == Some("length") {
-                        return width(cx, value);
-                    }
-                    let color = cx.as_color(value, None)?;
-                    Some(Vec::from_iter_in([(color_var, color)], cx.alloc))
+            UtilityValue::Named { value, .. } => {
+                if let Some(v) = cx.resolve_theme_color(value, modifier, &["--ring-color", "--color"]) {
+                    return cx.one(color_var, v);
                 }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(color) = cx.resolve_theme_color(value, None, &["--ring-color", "--color"]) {
-                        return Some(Vec::from_iter_in([(color_var, color)], cx.alloc));
-                    }
-                    let value = cx
-                        .resolve(Some(value), &["--ring-width"])
-                        .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])))
-                        .filter(|v| !v.is_empty())?;
-                    width(cx, value)
+                if modifier.is_some() {
+                    return None;
                 }
+                let v = cx
+                    .resolve(Some(value), &["--ring-width"])
+                    .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])))
+                    .filter(|v| !v.is_empty())?;
+                width(v)
             }
-        },
-    );
+        }
+    });
     r.suggest(
         name,
         vec![
@@ -287,13 +190,7 @@ fn line_height<'a>(cx: &Cx<'a, '_>, modifier: Modifier<'a>) -> Option<&'a str> {
         Modifier::Arbitrary(v) => Some(v),
         Modifier::Named(v) => cx.resolve(Some(v), &["--leading"]),
     };
-    resolved.filter(|v| !v.is_empty()).or_else(|| {
-        if is_multiple_of_quarter(name) {
-            cx.resolve(None, &["--spacing"]).filter(|v| !v.is_empty())?;
-            return Some(cx.cat(&["--spacing(", name, ")"]));
-        }
-        (name == "none").then_some("1")
-    })
+    resolved.filter(|v| !v.is_empty()).or_else(|| cx.spacing(name, false)).or_else(|| (name == "none").then_some("1"))
 }
 
 fn font_size<'a>(cx: &Cx<'a, '_>, size: &'a str, modifier: Option<Modifier<'a>>) -> Option<Nodes<'a>> {
@@ -318,79 +215,44 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     for style in ["none", "solid", "dashed", "dotted", "double"] {
         r.static_decls(&format!("outline-{style}"), &[("--tw-outline-style", style), ("outline-style", style)]);
     }
-    r.functional_decl(
-        "outline",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+    r.functional_fn("outline", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        let width =
+            |v| Some(cx.nodes([outline_properties(cx), cx.decl("outline-style", "var(--tw-outline-style)"), cx.decl("outline-width", v)]));
+        let Some(value) = value else {
+            if modifier.is_some() {
                 return None;
-            };
-            let width = |v| {
-                Some(cx.nodes([outline_properties(cx), cx.decl("outline-style", "var(--tw-outline-style)"), cx.decl("outline-width", v)]))
-            };
-            let Some(value) = value else {
+            }
+            return width(cx.theme.get(&["--default-outline-width"]).unwrap_or("1px"));
+        };
+        match value {
+            UtilityValue::Arbitrary { data_type, value } => {
+                match arbitrary_type(data_type, value, &[DataType::Color, DataType::Length, DataType::Number, DataType::Percentage]) {
+                    Some("length" | "number" | "percentage") => {
+                        if modifier.is_some() {
+                            return None;
+                        }
+                        width(value)
+                    }
+                    _ => cx.one("outline-color", cx.as_color(value, modifier)?),
+                }
+            }
+            UtilityValue::Named { value, .. } => {
+                if let Some(v) = cx.resolve_theme_color(value, modifier, &["--outline-color", "--color"]) {
+                    return cx.one("outline-color", v);
+                }
                 if modifier.is_some() {
                     return None;
                 }
-                return width(cx.theme.get(&["--default-outline-width"]).unwrap_or("1px"));
-            };
-            match value {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    match arbitrary_type(data_type, value, &[DataType::Color, DataType::Length, DataType::Number, DataType::Percentage]) {
-                        Some("length" | "number" | "percentage") => {
-                            if modifier.is_some() {
-                                return None;
-                            }
-                            width(value)
-                        }
-                        _ => cx.one("outline-color", cx.as_color(value, modifier)?),
-                    }
+                if let Some(v) = cx.resolve(Some(value), &["--outline-width"]).filter(|v| !v.is_empty()) {
+                    return width(v);
                 }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(v) = cx.resolve_theme_color(value, modifier, &["--outline-color", "--color"]) {
-                        return cx.one("outline-color", v);
-                    }
-                    if modifier.is_some() {
-                        return None;
-                    }
-                    if let Some(v) = cx.resolve(Some(value), &["--outline-width"]).filter(|v| !v.is_empty()) {
-                        return width(v);
-                    }
-                    is_positive_integer(value).then(|| width(cx.cat(&[value, "px"])))?
-                }
+                is_positive_integer(value).then(|| width(cx.cat(&[value, "px"])))?
             }
-        },
-        |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            let width = |cx: &Cx<'a, '_>, v: &'a str| {
-                Some(Vec::from_iter_in([("outline-style", "var(--tw-outline-style)"), ("outline-width", v)], cx.alloc))
-            };
-            let Some(value) = value else {
-                return width(cx, cx.theme.get(&["--default-outline-width"]).unwrap_or("1px"));
-            };
-            match value {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    match arbitrary_type(data_type, value, &[DataType::Color, DataType::Length, DataType::Number, DataType::Percentage]) {
-                        Some("length" | "number" | "percentage") => width(cx, value),
-                        _ => {
-                            let color = cx.as_color(value, None)?;
-                            Some(Vec::from_iter_in([("outline-color", color)], cx.alloc))
-                        }
-                    }
-                }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(color) = cx.resolve_theme_color(value, None, &["--outline-color", "--color"]) {
-                        return Some(Vec::from_iter_in([("outline-color", color)], cx.alloc));
-                    }
-                    if let Some(v) = cx.resolve(Some(value), &["--outline-width"]).filter(|v| !v.is_empty()) {
-                        return width(cx, v);
-                    }
-                    is_positive_integer(value).then(|| width(cx, cx.cat(&[value, "px"])))?
-                }
-            }
-        },
-    );
+        }
+    });
     r.suggest(
         "outline",
         vec![
@@ -414,89 +276,45 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     );
     r.suggest("underline-offset", vec![Suggest::values(&["0", "1", "2", "4", "8"]).negative(true).keys(&["--text-underline-offset"])]);
 
-    r.functional_decl(
-        "text",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => match arbitrary_type(
-                    data_type,
-                    value,
-                    &[DataType::Color, DataType::Length, DataType::Percentage, DataType::AbsoluteSize, DataType::RelativeSize],
-                ) {
-                    Some("size" | "length" | "percentage" | "absolute-size" | "relative-size") => font_size(cx, value, modifier),
-                    _ => cx.one("color", cx.as_color(value, modifier)?),
-                },
-                UtilityValue::Named { value, .. } => {
-                    if let Some(v) = cx.resolve_theme_color(value, modifier, &["--text-color", "--color"]) {
-                        return cx.one("color", v);
-                    }
-                    let (size, options) =
-                        cx.theme.resolve_with(value, &["--text"], &["--line-height", "--letter-spacing", "--font-weight"], cx.options)?;
-                    if modifier.is_some() {
-                        return font_size(cx, size, modifier);
-                    }
-                    let option = |key: &str, var: &str| {
-                        options
-                            .iter()
-                            .find(|(name, _)| *name == key)
-                            .map(|&(_, v)| v)
-                            .filter(|v| !v.is_empty())
-                            .map(|v| cx.cat(&["var(", var, ", ", v, ")"]))
-                    };
-                    Some(cx.nodes([
-                        cx.decl("font-size", size),
-                        cx.decl_opt("line-height", option("--line-height", "--tw-leading")),
-                        cx.decl_opt("letter-spacing", option("--letter-spacing", "--tw-tracking")),
-                        cx.decl_opt("font-weight", option("--font-weight", "--tw-font-weight")),
-                    ]))
+    r.functional_fn("text", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        match value? {
+            UtilityValue::Arbitrary { data_type, value } => match arbitrary_type(
+                data_type,
+                value,
+                &[DataType::Color, DataType::Length, DataType::Percentage, DataType::AbsoluteSize, DataType::RelativeSize],
+            ) {
+                Some("size" | "length" | "percentage" | "absolute-size" | "relative-size") => font_size(cx, value, modifier),
+                _ => cx.one("color", cx.as_color(value, modifier)?),
+            },
+            UtilityValue::Named { value, .. } => {
+                if let Some(v) = cx.resolve_theme_color(value, modifier, &["--text-color", "--color"]) {
+                    return cx.one("color", v);
                 }
-            }
-        },
-        |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => match arbitrary_type(
-                    data_type,
-                    value,
-                    &[DataType::Color, DataType::Length, DataType::Percentage, DataType::AbsoluteSize, DataType::RelativeSize],
-                ) {
-                    Some("size" | "length" | "percentage" | "absolute-size" | "relative-size") => {
-                        Some(Vec::from_iter_in([("font-size", value)], cx.alloc))
-                    }
-                    _ => {
-                        let color = cx.as_color(value, None)?;
-                        Some(Vec::from_iter_in([("color", color)], cx.alloc))
-                    }
-                },
-                UtilityValue::Named { value, .. } => {
-                    if let Some(color) = cx.resolve_theme_color(value, None, &["--text-color", "--color"]) {
-                        return Some(Vec::from_iter_in([("color", color)], cx.alloc));
-                    }
-                    let (size, options) =
-                        cx.theme.resolve_with(value, &["--text"], &["--line-height", "--letter-spacing", "--font-weight"], cx.options)?;
-                    let mut out = Vec::with_capacity_in(4, cx.alloc);
-                    out.push(("font-size", size));
-                    for (key, var, property) in [
-                        ("--line-height", "--tw-leading", "line-height"),
-                        ("--letter-spacing", "--tw-tracking", "letter-spacing"),
-                        ("--font-weight", "--tw-font-weight", "font-weight"),
-                    ] {
-                        if let Some(&(_, value)) = options.iter().find(|(name, _)| *name == key)
-                            && !value.is_empty()
-                        {
-                            out.push((property, cx.cat(&["var(", var, ", ", value, ")"])));
-                        }
-                    }
-                    Some(out)
+                let (size, options) =
+                    cx.theme.resolve_with(value, &["--text"], &["--line-height", "--letter-spacing", "--font-weight"], cx.inline)?;
+                if modifier.is_some() {
+                    return font_size(cx, size, modifier);
                 }
+                let option = |key: &str, var: &str| {
+                    options
+                        .iter()
+                        .find(|(name, _)| *name == key)
+                        .map(|&(_, v)| v)
+                        .filter(|v| !v.is_empty())
+                        .map(|v| cx.cat(&["var(", var, ", ", v, ")"]))
+                };
+                Some(cx.nodes([
+                    cx.decl("font-size", size),
+                    cx.decl_opt("line-height", option("--line-height", "--tw-leading")),
+                    cx.decl_opt("letter-spacing", option("--letter-spacing", "--tw-tracking")),
+                    cx.decl_opt("font-weight", option("--font-weight", "--tw-font-weight")),
+                ]))
             }
-        },
-    );
+        }
+    });
     r.suggest(
         "text",
         vec![Suggest::color(&["--text-color", "--color"]), Suggest::default().keys(&["--text"]).modifier_keys(&["--leading"])],
@@ -566,67 +384,36 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
         " var(--tw-inset-ring-color, currentcolor)",
     );
 
-    r.functional_decl(
-        "ring-offset",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                return None;
-            };
-            let width = |v| Some(cx.nodes([cx.decl("--tw-ring-offset-width", v), cx.decl("--tw-ring-offset-shadow", RING_OFFSET_SHADOW)]));
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    if arbitrary_type(data_type, value, &[DataType::Color, DataType::Length]) == Some("length") {
-                        if modifier.is_some() {
-                            return None;
-                        }
-                        return width(value);
+    r.functional_fn("ring-offset", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        let width = |v| Some(cx.nodes([cx.decl("--tw-ring-offset-width", v), cx.decl("--tw-ring-offset-shadow", RING_OFFSET_SHADOW)]));
+        match value? {
+            UtilityValue::Arbitrary { data_type, value } => {
+                if arbitrary_type(data_type, value, &[DataType::Color, DataType::Length]) == Some("length") {
+                    if modifier.is_some() {
+                        return None;
                     }
-                    cx.one("--tw-ring-offset-color", cx.as_color(value, modifier)?)
+                    return width(value);
                 }
-                UtilityValue::Named { value, .. } => {
-                    let w = cx
-                        .resolve(Some(value), &["--ring-offset-width"])
-                        .filter(|v| !v.is_empty())
-                        .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])));
-                    if let Some(w) = w {
-                        if modifier.is_some() {
-                            return None;
-                        }
-                        return width(w);
-                    }
-                    cx.one("--tw-ring-offset-color", cx.resolve_theme_color(value, modifier, &["--ring-offset-color", "--color"])?)
-                }
+                cx.one("--tw-ring-offset-color", cx.as_color(value, modifier)?)
             }
-        },
-        |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            let width = |cx: &Cx<'a, '_>, v: &'a str| {
-                Some(Vec::from_iter_in([("--tw-ring-offset-width", v), ("--tw-ring-offset-shadow", RING_OFFSET_SHADOW)], cx.alloc))
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    if arbitrary_type(data_type, value, &[DataType::Color, DataType::Length]) == Some("length") {
-                        return width(cx, value);
+            UtilityValue::Named { value, .. } => {
+                let w = cx
+                    .resolve(Some(value), &["--ring-offset-width"])
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])));
+                if let Some(w) = w {
+                    if modifier.is_some() {
+                        return None;
                     }
-                    let color = cx.as_color(value, None)?;
-                    Some(Vec::from_iter_in([("--tw-ring-offset-color", color)], cx.alloc))
+                    return width(w);
                 }
-                UtilityValue::Named { value, .. } => {
-                    let w = cx
-                        .resolve(Some(value), &["--ring-offset-width"])
-                        .filter(|v| !v.is_empty())
-                        .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])));
-                    if let Some(w) = w {
-                        return width(cx, w);
-                    }
-                    let color = cx.resolve_theme_color(value, None, &["--ring-offset-color", "--color"])?;
-                    Some(Vec::from_iter_in([("--tw-ring-offset-color", color)], cx.alloc))
-                }
+                cx.one("--tw-ring-offset-color", cx.resolve_theme_color(value, modifier, &["--ring-offset-color", "--color"])?)
             }
-        },
-    );
+        }
+    });
     r.suggest(
         "ring-offset",
         vec![

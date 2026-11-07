@@ -1,6 +1,6 @@
 [package]
 name = "orisu_candidate"
-description = "Class candidates: parsing, printing, variant groups and interned ids."
+description = "Class candidates: parsing, printing and variant groups."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 orisu_allocator.workspace = true
+orisu_ast.workspace = true
 orisu_parser.workspace = true
 memchr.workspace = true
 smallvec.workspace = true

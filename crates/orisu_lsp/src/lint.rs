@@ -2,7 +2,7 @@
 
 use crate::context::{Matcher, Scan, Scope, Token};
 use crate::document::Language;
-use crate::project::{ClassInfo, Project};
+use crate::project::{ClassInfo, Project, custom_property_end};
 use crate::settings::{Level, Settings};
 use memchr::memmem;
 use orisu_diagnostics::{Code, Edit, Report, Span};
@@ -21,8 +21,19 @@ pub fn scan(project: &Project, settings: &Settings, text: &str, language: Langua
     matcher.scan(text, language)
 }
 
-/// Lints the scanned regions; canonical spellings only when `canonical`, since the first one takes a while.
-pub fn lint(project: &Project, settings: &Settings, scan: &Scan, canonical: bool) -> Vec<Finding> {
+/// How thoroughly [`lint`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pass {
+    /// Skips canonical spellings, since the first one takes a while.
+    Quick,
+    Full,
+    /// What `orisu check` reports: unknown utilities only with a close known spelling, as misspellings.
+    Check,
+}
+
+/// Lints the scanned regions.
+pub fn lint(project: &Project, settings: &Settings, scan: &Scan, pass: Pass) -> Vec<Finding> {
+    let canonical = pass != Pass::Quick;
     let lint = &settings.lint;
     let mut out = Vec::new();
     let mut push = |report: Report, level: Level| {
@@ -38,7 +49,7 @@ pub fn lint(project: &Project, settings: &Settings, scan: &Scan, canonical: bool
             let known = info.css.is_some();
             if !known {
                 if lint.unknown_classes != Level::Ignore
-                    && let Some(report) = unknown(project, token)
+                    && let Some(report) = unknown(project, token, pass != Pass::Check)
                 {
                     push(report, lint.unknown_classes);
                 }
@@ -71,8 +82,9 @@ fn replace(token: &Token, text: String) -> Edit {
     Edit { start: token.start as u32, end: token.end as u32, text }
 }
 
-/// `[UNKNOWN_VARIANT]` when the utility alone is known, else `[UNKNOWN_UTILITY]` with the closest spelling as a fix.
-fn unknown(project: &Project, token: &Token) -> Option<Report> {
+/// `[UNKNOWN_VARIANT]` when the utility alone is known, else `[UNKNOWN_UTILITY]` with the closest spelling as a fix; without
+/// one, only when `without_suggestion`.
+fn unknown(project: &Project, token: &Token, without_suggestion: bool) -> Option<Report> {
     let span = Span::new(token.start, token.end);
     let parts = segment(&token.class, b':');
     let (base, variants) = parts.split_last()?;
@@ -83,7 +95,7 @@ fn unknown(project: &Project, token: &Token) -> Option<Report> {
     let report = Report::new(Code::UnknownUtility, span).arg("class", token.class.as_str());
     let utility = base.trim_start_matches('!').trim_end_matches('!');
     let Some(suggestion) = project.suggestion(utility) else {
-        return Some(report);
+        return without_suggestion.then_some(report);
     };
     let replacement = token.class.replacen(utility, suggestion, 1);
     Some(report.arg("suggestion", suggestion).fix(vec![replace(token, replacement)]))
@@ -123,7 +135,7 @@ fn referenced_variables(class: &str) -> impl Iterator<Item = &str> {
         if at == 0 || !matches!(bytes[at - 1], b'(' | b',') {
             return None;
         }
-        let end = bytes[at..].iter().position(|&b| !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).map_or(bytes.len(), |n| at + n);
+        let end = custom_property_end(bytes, at);
         Some(&class[at..end])
     })
 }

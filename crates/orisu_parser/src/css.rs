@@ -2,7 +2,7 @@
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
 use orisu_allocator::{Allocator, ArenaString, Vec};
-use orisu_ast::bytes::{ByteTable, trim};
+use orisu_ast::bytes::{ByteTable, WS_WITHOUT_FORM_FEED, trim};
 use orisu_ast::{Node, Nodes, parse_at_rule};
 use smallvec::SmallVec;
 use std::fmt;
@@ -181,7 +181,7 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
                     let c = bytes[j];
                     if !CUSTOM_PROPERTY.has(c) {
                         let end = CUSTOM_PROPERTY.find(bytes, j).unwrap_or(len);
-                        if let Some(last) = bytes[j..end].iter().rposition(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r')) {
+                        if let Some(last) = bytes[j..end].iter().rposition(|&b| !WS_WITHOUT_FORM_FEED.has(b)) {
                             value_end = j + last + 1 - start;
                         }
                         j = end;
@@ -370,12 +370,7 @@ fn parse_string(input: &str, start: usize, quote: u8) -> Result<usize, CssSyntax
         match bytes[at] {
             b'\\' => from = at + 2,
             b'\n' => {
-                let cr = at > from && bytes[at - 1] == b'\r';
-                let semi = if cr { at - 1 } else { at };
-                if semi > from && bytes[semi - 1] == b';' {
-                    return Err(error(format!("Unterminated string: {}{}", &input[start..semi], quote as char), Some(start)));
-                }
-                let end = if cr { at - 1 } else { at };
+                let end = if at > from && bytes[at - 1] == b'\r' { at - 1 } else { at };
                 return Err(error(format!("Unterminated string: {}{}", &input[start..end], quote as char), Some(start)));
             }
             _ => return Ok(at),

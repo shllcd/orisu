@@ -76,13 +76,7 @@ impl<'a> Ctx<'a> {
     pub fn hover(&self, offset: usize) -> Option<Hover> {
         let token = self.token_at(offset)?;
         let css = self.project.info(&token.class).css.clone()?;
-        Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: format!("```css\n{}\n```", css.trim_end()),
-            }),
-            range: Some(self.range(token.start, token.end)),
-        })
+        Some(Hover { contents: HoverContents::Markup(css_markup(&css)), range: Some(self.range(token.start, token.end)) })
     }
 
     pub fn completion(&self, offset: usize) -> Option<Completions<'a>> {
@@ -166,7 +160,7 @@ impl<'a> Ctx<'a> {
 
     /// Lints the document; canonical spellings only when `canonical`, since the first one takes a while.
     pub fn diagnostics(&self, uri: &Uri, canonical: bool) -> Vec<Diagnostic> {
-        let findings = lint::lint(self.project, self.settings, self.scan(), canonical);
+        let findings = lint::lint(self.project, self.settings, self.scan(), if canonical { lint::Pass::Full } else { lint::Pass::Quick });
         findings.into_iter().filter_map(|finding| Some(self.diagnostic(uri, &finding.report, finding.level.severity()?))).collect()
     }
 
@@ -278,10 +272,7 @@ pub fn resolve_completion(project: &Project, mut item: CompletionItem) -> Comple
         if info.color.is_some() {
             item.detail = Some(css.split_whitespace().collect::<Vec<_>>().join(" "));
         } else {
-            item.documentation = Some(Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: format!("```css\n{}\n```", css.trim_end()),
-            }));
+            item.documentation = Some(Documentation::MarkupContent(css_markup(css)));
         }
     }
     item
@@ -298,4 +289,8 @@ impl Level {
             Level::Error => Some(S::ERROR),
         }
     }
+}
+
+fn css_markup(css: &str) -> MarkupContent {
+    MarkupContent { kind: MarkupKind::Markdown, value: format!("```css\n{}\n```", css.trim_end()) }
 }

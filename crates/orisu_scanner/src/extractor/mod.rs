@@ -3,7 +3,6 @@ use crate::extractor::machine::Span;
 use candidate_machine::CandidateMachine;
 use css_variable_machine::CssVariableMachine;
 use machine::{Machine, MachineState};
-use std::fmt;
 
 pub mod arbitrary_property_machine;
 pub mod arbitrary_value_machine;
@@ -34,19 +33,6 @@ pub enum Extracted<'a> {
     /// E.g.: `--my-variable`
     ///
     CssVariable(&'a [u8]),
-}
-
-impl fmt::Display for Extracted<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Extracted::Candidate(candidate) => {
-                write!(f, "Candidate({})", std::str::from_utf8(candidate).unwrap())
-            }
-            Extracted::CssVariable(candidate) => {
-                write!(f, "CssVariable({})", std::str::from_utf8(candidate).unwrap())
-            }
-        }
-    }
 }
 
 #[derive(Debug)]

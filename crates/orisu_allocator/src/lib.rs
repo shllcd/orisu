@@ -1,12 +1,10 @@
 //! Two arenas back every orisu tree. `'perm` data (theme, registry, compiled rules) lives as long as the
 //! design system; `'frame` data lives for one build. Both are bump arenas; the lifetimes keep them apart.
 
-mod intern;
 mod vec;
 
 pub use bumpalo::Bump as Allocator;
 pub use bumpalo::collections::String as ArenaString;
-pub use intern::{Id, Interner};
 pub use vec::Vec;
 
 pub trait AllocExt {

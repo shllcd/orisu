@@ -21,9 +21,9 @@ orisu_mangle.workspace = true
 orisu_merge.workspace = true
 orisu_registry.workspace = true
 orisu_scanner.workspace = true
-napi = { version = "3.13", default-features = false, features = ["napi4", "dyn-symbols"] }
+orisu_theme.workspace = true
+napi = { version = "3.13", default-features = false, features = ["napi4", "dyn-symbols", "serde-json"] }
 napi-derive = "3.6"
-self_cell.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true
 rustc-hash.workspace = true

@@ -675,6 +675,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -790,6 +792,8 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -909,7 +913,6 @@ name = "orisu_allocator"
 version = "0.1.0"
 dependencies = [
  "bumpalo",
- "rustc-hash",
 ]
 
 [[package]]
@@ -939,6 +942,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "orisu_allocator",
+ "orisu_ast",
  "orisu_parser",
  "smallvec",
 ]
@@ -968,11 +972,13 @@ dependencies = [
  "orisu_allocator",
  "orisu_ast",
  "orisu_candidate",
+ "orisu_canonical",
  "orisu_compiler",
  "orisu_parser",
  "orisu_registry",
  "orisu_theme",
  "rustc-hash",
+ "self_cell",
  "serde",
  "serde_json",
 ]
@@ -1026,7 +1032,9 @@ dependencies = [
  "lsp-types",
  "memchr",
  "orisu_allocator",
+ "orisu_analyze",
  "orisu_ast",
+ "orisu_candidate",
  "orisu_canonical",
  "orisu_compat_tailwind",
  "orisu_compiler",
@@ -1035,7 +1043,6 @@ dependencies = [
  "orisu_parser",
  "orisu_scanner",
  "rustc-hash",
- "self_cell",
  "serde",
  "serde_json",
 ]
@@ -1053,6 +1060,8 @@ dependencies = [
  "oxc_sourcemap",
  "rayon",
  "rustc-hash",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1085,8 +1094,8 @@ dependencies = [
  "orisu_merge",
  "orisu_registry",
  "orisu_scanner",
+ "orisu_theme",
  "rustc-hash",
- "self_cell",
  "serde_json",
 ]
 
@@ -1106,7 +1115,6 @@ dependencies = [
 name = "orisu_parser"
 version = "0.1.0"
 dependencies = [
- "indexmap",
  "memchr",
  "orisu_allocator",
  "orisu_ast",
@@ -1910,6 +1918,8 @@ dependencies = [
  "orisu_compat_tailwind",
  "orisu_compiler",
  "orisu_diagnostics",
+ "orisu_mangle",
+ "orisu_merge",
  "orisu_optimizer",
  "serde_json",
 ]

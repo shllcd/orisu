@@ -1,7 +1,7 @@
-pub const INDEX: &str = include_str!("../assets/index.css");
-pub const PREFLIGHT: &str = include_str!("../assets/preflight.css");
-pub const THEME: &str = include_str!("../assets/theme.css");
-pub const UTILITIES: &str = include_str!("../assets/utilities.css");
+const INDEX: &str = include_str!("../assets/index.css");
+const PREFLIGHT: &str = include_str!("../assets/preflight.css");
+const THEME: &str = include_str!("../assets/theme.css");
+const UTILITIES: &str = include_str!("../assets/utilities.css");
 
 pub fn builtin(id: &str) -> Option<&'static str> {
     Some(match id {

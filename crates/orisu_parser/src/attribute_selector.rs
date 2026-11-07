@@ -1,6 +1,8 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
+use orisu_ast::bytes::WS_WITHOUT_FORM_FEED;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttributeSelector<'a> {
     pub attribute: &'a str,
@@ -12,7 +14,7 @@ pub struct AttributeSelector<'a> {
 
 #[inline]
 fn is_ws(b: Option<u8>) -> bool {
-    matches!(b, Some(b' ' | b'\t' | b'\n' | b'\r'))
+    b.is_some_and(|b| WS_WITHOUT_FORM_FEED.has(b))
 }
 
 /// Whether `input` is a single well-formed `[attr op value flag]` selector.

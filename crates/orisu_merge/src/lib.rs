@@ -3,13 +3,14 @@ use orisu_ast::Node;
 use orisu_compiler::compile::compile_candidates;
 use orisu_compiler::design_system::Session;
 use orisu_parser::segment::segment;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 const SIDES: [&str; 4] = ["bs", "ie", "be", "is"];
 const CORNERS: [&str; 4] = ["ss", "se", "ee", "es"];
 
-/// Variants whose relative order changes the generated selector meaningfully.
-const ORDER_SENSITIVE: &[&str] = &[
+/// Variants whose relative order changes the generated selector meaningfully. The JS `cn` runtime reads this list from
+/// `packages/orisu/src/merge-keys.ts`, which `cargo xtask codegen` writes, so both key classes the same way.
+pub const ORDER_SENSITIVE: &[&str] = &[
     "*",
     "**",
     "before",
@@ -51,7 +52,7 @@ fn push_sides(out: &mut Vec<String>, base: &str, sides: &[usize]) {
 }
 
 /// Expands a CSS property into the longhand slots it writes, so shorthands cover their longhands.
-pub fn property_slots(property: &str) -> Vec<String> {
+fn property_slots(property: &str) -> Vec<String> {
     let mut out = Vec::new();
     if property.starts_with("--") {
         out.push(property.to_owned());
@@ -141,8 +142,21 @@ pub fn property_slots(property: &str) -> Vec<String> {
     out
 }
 
-/// Splits a raw class into its normalized variant key, important flag and utility base.
-pub fn split_class<'c>(raw: &'c str, prefix: Option<&str>) -> (String, bool, &'c str) {
+struct Split<'c> {
+    /// The variants with each run between order-sensitive ones sorted.
+    variants: String,
+    important: bool,
+    base: &'c str,
+}
+
+impl Split<'_> {
+    /// The variants the class merges within, written as the JS `cn` runtime keys them.
+    fn group(self) -> String {
+        if self.important { format!("!{}", self.variants) } else { self.variants }
+    }
+}
+
+fn split_class<'c>(raw: &'c str, prefix: Option<&str>) -> Split<'c> {
     let mut parts = segment(raw, b':');
     let mut base = parts.pop().unwrap_or(raw);
     if let Some(prefix) = prefix.filter(|p| !p.is_empty())
@@ -177,12 +191,12 @@ pub fn split_class<'c>(raw: &'c str, prefix: Option<&str>) -> (String, bool, &'c
         }
     }
     flush(&mut run, &mut key);
-    (key, important, base)
+    Split { variants: key, important, base }
 }
 
 /// What a utility writes: the longhand slots it sets, the custom properties it sets and the ones it reads.
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
-pub struct Footprint {
+struct Footprint {
     props: Vec<String>,
     vars: Vec<String>,
     refs: Vec<String>,
@@ -190,7 +204,7 @@ pub struct Footprint {
 
 impl Footprint {
     /// Whether this (later) footprint leaves nothing observable of `earlier`.
-    pub fn erases(&self, earlier: &Footprint) -> bool {
+    fn erases(&self, earlier: &Footprint) -> bool {
         if earlier.props.is_empty() {
             return earlier.vars.iter().all(|v| self.vars.binary_search(v).is_ok());
         }
@@ -269,7 +283,7 @@ impl Collector {
 }
 
 /// What a utility (without variants) writes, or `None` when it is not a known class.
-pub fn footprint(ds: &mut Session<'_, '_>, base: &str) -> Option<Footprint> {
+fn footprint(ds: &mut Session<'_, '_>, base: &str) -> Option<Footprint> {
     let candidate = match ds.theme.prefix().filter(|p| !p.is_empty()) {
         Some(prefix) => format!("{prefix}:{base}"),
         None => base.to_owned(),
@@ -313,9 +327,9 @@ impl<'s, 'a> Merger<'s, 'a> {
 
     /// The variants `class` merges within, written as the JS `cn` runtime keys them, and its shape.
     pub fn class_shape(&mut self, class: &str) -> (String, Option<u32>) {
-        let (key, important, base) = split_class(class, self.ds.theme.prefix());
-        let group = if important { format!("!{key}") } else { key };
-        (group, self.shape(base))
+        let split = split_class(class, self.ds.theme.prefix());
+        let shape = self.shape(split.base);
+        (split.group(), shape)
     }
 
     pub fn merge<'c>(&mut self, classes: impl IntoIterator<Item = &'c str>) -> String {
@@ -323,11 +337,11 @@ impl<'s, 'a> Merger<'s, 'a> {
         let mut later: FxHashMap<(String, bool), Vec<u32>> = FxHashMap::default();
         let mut keep = vec![true; classes.len()];
         for (i, class) in classes.iter().enumerate().rev() {
-            let (key, important, base) = split_class(class, self.ds.theme.prefix());
+            let Split { variants, important, base } = split_class(class, self.ds.theme.prefix());
             let Some(id) = self.shape(base) else { continue };
             let shapes = &self.shapes;
             let earlier = &shapes[id as usize];
-            let seen = later.entry((key, important)).or_default();
+            let seen = later.entry((variants, important)).or_default();
             if seen.iter().any(|&l| shapes[l as usize].erases(earlier)) {
                 keep[i] = false;
             } else {
@@ -346,29 +360,30 @@ impl<'s, 'a> Merger<'s, 'a> {
         out
     }
 
-    /// Shape table for the given classes, keyed by utility base, for the JS `cn` runtime.
-    pub fn table<'c>(&mut self, classes: impl IntoIterator<Item = &'c str>) -> MergeTable {
+    /// Shape table for the given classes, keyed by utility base, for the JS `cn` runtime, and the groups of the classes
+    /// that have a shape.
+    pub fn table<'c>(&mut self, classes: impl IntoIterator<Item = &'c str>) -> (MergeTable, FxHashSet<String>) {
         let mut entries: IndexMap<String, u32, FxBuildHasher> = IndexMap::default();
+        let mut groups = FxHashSet::default();
         for class in classes {
-            let (_, _, base) = split_class(class, self.ds.theme.prefix());
-            if entries.contains_key(base) {
-                continue;
-            }
-            if let Some(id) = self.shape(base) {
-                entries.insert(base.to_owned(), id);
-            }
+            let split = split_class(class, self.ds.theme.prefix());
+            let Some(id) = self.shape(split.base) else { continue };
+            entries.entry(split.base.to_owned()).or_insert(id);
+            groups.insert(split.group());
         }
         let shapes = &self.shapes;
         let erases = shapes
             .iter()
             .map(|later| shapes.iter().enumerate().filter(|(_, earlier)| later.erases(earlier)).map(|(i, _)| i as u32).collect())
             .collect();
-        MergeTable { erases, entries }
+        let (keys, values) = entries.into_iter().unzip();
+        (MergeTable { keys, values, erases }, groups)
     }
 }
 
+/// Utility bases and their shapes, in parallel lists, and for shape `i` the shapes it erases, itself included.
 pub struct MergeTable {
-    /// For each shape, the shapes it erases (itself included).
+    pub keys: Vec<String>,
+    pub values: Vec<u32>,
     pub erases: Vec<Vec<u32>>,
-    pub entries: IndexMap<String, u32, FxBuildHasher>,
 }

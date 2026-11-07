@@ -28,87 +28,43 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
         let style = r.cat(&[side, "-style"]);
         let width = r.cat(&[side, "-width"]);
         let color = r.cat(&[side, "-color"]);
-        r.functional_decl(
-            root,
-            move |cx, c| {
-                let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+        r.functional_fn(root, move |cx, c| {
+            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+                return None;
+            };
+            let with_width = |v| Some(cx.nodes([border_properties(cx), cx.decl(style, "var(--tw-border-style)"), cx.decl(width, v)]));
+            let Some(value) = value else {
+                if modifier.is_some() {
                     return None;
-                };
-                let with_width = |v| Some(cx.nodes([border_properties(cx), cx.decl(style, "var(--tw-border-style)"), cx.decl(width, v)]));
-                let Some(value) = value else {
+                }
+                return with_width(cx.theme.get(&["--default-border-width"]).unwrap_or("1px"));
+            };
+            match value {
+                UtilityValue::Arbitrary { data_type, value } => {
+                    match arbitrary_type(data_type, value, &[DataType::Color, DataType::LineWidth, DataType::Length]) {
+                        Some("line-width" | "length") => {
+                            if modifier.is_some() {
+                                return None;
+                            }
+                            with_width(value)
+                        }
+                        _ => cx.one(color, cx.as_color(value, modifier)?),
+                    }
+                }
+                UtilityValue::Named { value, .. } => {
+                    if let Some(v) = cx.resolve_theme_color(value, modifier, &["--border-color", "--color"]) {
+                        return cx.one(color, v);
+                    }
                     if modifier.is_some() {
                         return None;
                     }
-                    return with_width(cx.theme.get(&["--default-border-width"]).unwrap_or("1px"));
-                };
-                match value {
-                    UtilityValue::Arbitrary { data_type, value } => {
-                        match arbitrary_type(data_type, value, &[DataType::Color, DataType::LineWidth, DataType::Length]) {
-                            Some("line-width" | "length") => {
-                                if modifier.is_some() {
-                                    return None;
-                                }
-                                with_width(value)
-                            }
-                            _ => cx.one(color, cx.as_color(value, modifier)?),
-                        }
+                    if let Some(v) = cx.resolve(Some(value), &["--border-width"]).filter(|v| !v.is_empty()) {
+                        return with_width(v);
                     }
-                    UtilityValue::Named { value, .. } => {
-                        if let Some(v) = cx.resolve_theme_color(value, modifier, &["--border-color", "--color"]) {
-                            return cx.one(color, v);
-                        }
-                        if modifier.is_some() {
-                            return None;
-                        }
-                        if let Some(v) = cx.resolve(Some(value), &["--border-width"]).filter(|v| !v.is_empty()) {
-                            return with_width(v);
-                        }
-                        is_positive_integer(value).then(|| with_width(cx.cat(&[value, "px"])))?
-                    }
+                    is_positive_integer(value).then(|| with_width(cx.cat(&[value, "px"])))?
                 }
-            },
-            move |cx, c| {
-                let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                    return None;
-                };
-                let with_width =
-                    |cx: &Cx<'a, '_>, v: &'a str| Some(Vec::from_iter_in([(style, "var(--tw-border-style)"), (width, v)], cx.alloc));
-                let Some(value) = value else {
-                    if modifier.is_some() {
-                        return None;
-                    }
-                    return with_width(cx, cx.theme.get(&["--default-border-width"]).unwrap_or("1px"));
-                };
-                match value {
-                    UtilityValue::Arbitrary { data_type, value } => {
-                        match arbitrary_type(data_type, value, &[DataType::Color, DataType::LineWidth, DataType::Length]) {
-                            Some("line-width" | "length") => {
-                                if modifier.is_some() {
-                                    return None;
-                                }
-                                with_width(cx, value)
-                            }
-                            _ => {
-                                let value = cx.as_color(value, modifier)?;
-                                Some(Vec::from_iter_in([(color, value)], cx.alloc))
-                            }
-                        }
-                    }
-                    UtilityValue::Named { value, .. } => {
-                        if let Some(v) = cx.resolve_theme_color(value, modifier, &["--border-color", "--color"]) {
-                            return Some(Vec::from_iter_in([(color, v)], cx.alloc));
-                        }
-                        if modifier.is_some() {
-                            return None;
-                        }
-                        if let Some(v) = cx.resolve(Some(value), &["--border-width"]).filter(|v| !v.is_empty()) {
-                            return with_width(cx, v);
-                        }
-                        is_positive_integer(value).then(|| with_width(cx, cx.cat(&[value, "px"])))?
-                    }
-                }
-            },
-        );
+            }
+        });
         r.suggest(
             root,
             vec![

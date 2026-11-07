@@ -1,20 +1,7 @@
 // Caching strategy adapted from shadcn-ui/cn (https://github.com/shadcn-ui/cn),
 // MIT License, Copyright (c) 2026 shadcn.
 
-const ORDER_SENSITIVE = new Set([
-  "*",
-  "**",
-  "before",
-  "after",
-  "backdrop",
-  "placeholder",
-  "file",
-  "marker",
-  "selection",
-  "first-line",
-  "first-letter",
-  "details-content",
-]);
+import { NAME_ALPHABET, NAME_FIRST, ORDER_SENSITIVE } from "./merge-keys.ts";
 
 const CACHE_SIZE = 8192;
 const PARSED_SIZE = 32768;
@@ -29,6 +16,7 @@ interface ParsedClass {
 let prefix = "";
 let entries: Map<string, ParsedClass> = new Map();
 let erasures: readonly (readonly number[])[] = [];
+/** The number of shapes, which index the stamps instead of the deduplicated erase lists. */
 let stride = 1;
 
 let groups = new Map<string, number>([["", 0]]);
@@ -74,23 +62,22 @@ export interface MergeTableSource {
   names?: NameTableSource | null;
 }
 
-const ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
-
 /** The `k`-th short name, as `orisu_mangle::names::name` makes it. */
 const shortName = (k: number): string => {
-  let count = 52;
+  const rest = NAME_ALPHABET.length;
+  let count = NAME_FIRST;
   let length = 1;
   while (k >= count) {
     k -= count;
-    count *= 64;
+    count *= rest;
     length++;
   }
   let out = "";
   for (let i = 1; i < length; i++) {
-    out = ALPHABET[k % 64] + out;
-    k = Math.floor(k / 64);
+    out = NAME_ALPHABET[k % rest] + out;
+    k = Math.floor(k / rest);
   }
-  return ALPHABET[k] + out;
+  return NAME_ALPHABET[k] + out;
 };
 
 const parseDeltas = (parts: string[], start: number): number[] => {
@@ -122,7 +109,6 @@ export const registerMergeTable = (table: MergeTableSource): void => {
   const parts = table.keys.split("\n");
   const values = table.values.split(",");
   const alias = table.alias.split(",");
-  // Shapes, not the deduplicated lists, index the stamps.
   stride = Math.max(alias.length, 1);
   entries = new Map();
   let previous = "";

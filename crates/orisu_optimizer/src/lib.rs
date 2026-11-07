@@ -3,10 +3,10 @@
 
 use indexmap::IndexSet;
 use orisu_allocator::{AllocExt, Allocator, ArenaString};
-use orisu_ast::{Builder, Ctx, Node, Nodes, Source};
-use orisu_parser::misc::extract_used_variables;
+use orisu_ast::{Builder, Ctx, Node, Nodes, Source, children_at_mut, node_at};
 use orisu_parser::segment::segment;
 use orisu_parser::selector::{self as sp, SNode};
+use orisu_parser::value::extract_used_variables;
 use orisu_parser::value::{self as vp, ValueNode};
 use orisu_theme::{Theme, UsedVars, opts};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
@@ -96,7 +96,7 @@ struct State<'a, 't, 'th> {
     fragments: &'t [&'t Fragment<'a>],
 }
 
-pub fn track_used_variables<'a>(theme: &Theme<'_>, used: &mut UsedVars, raw: &'a str, alloc: &'a Allocator) {
+pub(crate) fn track_used_variables<'a>(theme: &Theme<'_>, used: &mut UsedVars, raw: &'a str, alloc: &'a Allocator) {
     for variable in extract_used_variables(raw, alloc) {
         theme.mark_used_variable(variable, used);
     }
@@ -319,23 +319,6 @@ impl<'a, 'th: 'a> State<'a, '_, 'th> {
     }
 }
 
-fn container_mut<'r, 'a>(root: &'r mut Nodes<'a>, path: &[usize]) -> Option<&'r mut Nodes<'a>> {
-    let mut cur = root;
-    for &i in path {
-        cur = cur.get_mut(i)?.children_mut()?;
-    }
-    Some(cur)
-}
-
-fn node_at<'r, 'a>(root: &'r [Node<'a>], path: &[usize]) -> Option<&'r Node<'a>> {
-    let (first, rest) = path.split_first()?;
-    let mut cur = root.get(*first)?;
-    for &i in rest {
-        cur = cur.children()?.get(i)?;
-    }
-    Some(cur)
-}
-
 pub fn optimize_ast<'a, 'th: 'a>(
     ast: &[Node<'a>],
     theme: &Theme<'th>,
@@ -401,7 +384,7 @@ pub fn optimize_spliced<'a, 'th: 'a>(
             continue;
         }
         let (index, parent_path) = path.split_last().map(|(i, p)| (*i, p.to_vec())).unwrap_or((0, Vec::new()));
-        let Some(container) = container_mut(tree, &parent_path) else {
+        let Some(container) = children_at_mut(tree, &parent_path) else {
             continue;
         };
         if index + span > container.len() {
@@ -421,7 +404,7 @@ pub fn optimize_spliced<'a, 'th: 'a>(
             if !removable {
                 break;
             }
-            let Some(container) = container_mut(tree, holder) else {
+            let Some(container) = children_at_mut(tree, holder) else {
                 break;
             };
             if last < container.len() {
@@ -922,7 +905,7 @@ impl<'a, 'f> Nester<'a, 'f> {
         let mut levels: Vec<(usize, bool)> = Vec::new();
         let mut nodes = nodes;
         while let Some((first, rest)) = nodes.split_first() {
-            let Some(target) = container_mut(&mut self.result, &path) else {
+            let Some(target) = children_at_mut(&mut self.result, &path) else {
                 return;
             };
             let len = target.len();
@@ -1231,7 +1214,7 @@ impl<'a, 'f> Nester<'a, 'f> {
                 {
                     self.dedupe.insert(path.clone());
                 }
-                if let Some(c) = container_mut(&mut self.result, path) {
+                if let Some(c) = children_at_mut(&mut self.result, path) {
                     c.push(node);
                 }
                 return;
@@ -1288,7 +1271,7 @@ impl<'a, 'f> Nester<'a, 'f> {
         let mut nodes = Some(self.b.vec1(node));
         if let Some(&(selector, _)) = self.selector_stack.last() {
             if k == 0
-                && let Some(target) = container_mut(&mut self.result, &target_path)
+                && let Some(target) = children_at_mut(&mut self.result, &target_path)
                 && let Some(Node::Rule { selector: ls, nodes: children }) = target.last_mut()
                 && *ls == selector
             {
@@ -1309,7 +1292,7 @@ impl<'a, 'f> Nester<'a, 'f> {
             };
             built = Some(Node::AtRule { name, params, nodes: children });
         }
-        let Some(target) = container_mut(&mut self.result, &target_path) else {
+        let Some(target) = children_at_mut(&mut self.result, &target_path) else {
             return;
         };
         match built {
@@ -1345,7 +1328,7 @@ fn nest<'a>(
 fn dedupe_decls(ast: &mut Nodes<'_>, mut paths: Vec<Vec<usize>>) {
     paths.sort_by(|a, b| b.cmp(a));
     for path in paths {
-        let Some(nodes) = container_mut(ast, &path) else {
+        let Some(nodes) = children_at_mut(ast, &path) else {
             continue;
         };
         let mut seen = FxHashSet::default();

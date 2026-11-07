@@ -8,4 +8,3 @@ publish.workspace = true
 
 [dependencies]
 bumpalo.workspace = true
-rustc-hash.workspace = true

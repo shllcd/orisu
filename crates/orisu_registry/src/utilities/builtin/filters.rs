@@ -1,11 +1,10 @@
 use super::{arbitrary_type, bare_deg, bare_percent, push_alpha_replaced_drop_shadow};
 use crate::utilities::{Cx, DefaultValue, Functional, Named, Registrar, STEPS_OF_5, Suggest};
-use orisu_allocator::{ArenaString, Vec};
+use orisu_allocator::Vec;
 use orisu_ast::{Node, Nodes};
 use orisu_candidate::{CandidateKind, Modifier, UtilityValue};
 use orisu_parser::infer::{DataType, is_multiple_of_quarter};
 use orisu_parser::segment::segment;
-use orisu_parser::shadow::replace_shadow_colors;
 
 const FILTER_VALUE: &str = "var(--tw-blur, ) var(--tw-brightness, ) var(--tw-contrast, ) var(--tw-grayscale, ) var(--tw-hue-rotate, ) var(--tw-invert, ) var(--tw-saturate, ) var(--tw-sepia, ) var(--tw-drop-shadow, )";
 
@@ -143,131 +142,73 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     filter_pair(r, "sepia", bare_percent, Some("100%"), false, &["0", "50", "100"]);
 
     r.static_fn("drop-shadow-none", |cx, _| filter(cx, "--tw-drop-shadow", " "));
-    let drop_shadow_size = |cx: &Cx<'a, '_>, value: &'a str| {
-        let mut out = ArenaString::new_in(cx.alloc);
-        for (i, part) in segment(value, b',').into_iter().enumerate() {
-            if i > 0 {
-                out.push(' ');
+    r.functional_fn("drop-shadow", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        let alpha = match modifier {
+            Some(Modifier::Arbitrary(v)) => Some(v),
+            Some(Modifier::Named(v)) if is_multiple_of_quarter(v) => Some(cx.cat(&[v, "%"])),
+            _ => None,
+        };
+        let sized = |value: &'a str, shadow: &'a str| {
+            let mut nodes = Vec::with_capacity_in(6, cx.alloc);
+            nodes.push(filter_properties(cx));
+            nodes.push(cx.decl_opt("--tw-drop-shadow-alpha", alpha));
+            push_alpha_replaced_drop_shadow(cx, &mut nodes, "--tw-drop-shadow-size", value, alpha, "--tw-drop-shadow-color");
+            nodes.push(cx.decl("--tw-drop-shadow", shadow));
+            nodes.push(cx.decl("filter", FILTER_VALUE));
+            Some(nodes)
+        };
+        let drop_shadows = |resolved: &str| {
+            let parts: std::vec::Vec<String> = segment(resolved, b',').into_iter().map(|v| format!("drop-shadow({v})")).collect();
+            cx.str(&parts.join(" "))
+        };
+        let colored = |color: &'a str| {
+            Some(cx.nodes([
+                filter_properties(cx),
+                cx.decl("--tw-drop-shadow-color", color),
+                cx.decl("--tw-drop-shadow", "var(--tw-drop-shadow-size)"),
+            ]))
+        };
+        let Some(value) = value else {
+            let value = cx.theme.get(&["--drop-shadow"])?;
+            let resolved = cx.resolve(None, &["--drop-shadow"])?;
+            if modifier.is_some() && alpha.is_none() {
+                return None;
             }
-            out.push_str("drop-shadow(");
-            out.push_str(replace_shadow_colors(part, cx.alloc, &mut |color| cx.cat(&["var(", "--tw-drop-shadow-color", ", ", color, ")"])));
-            out.push(')');
+            return sized(value, drop_shadows(resolved));
+        };
+        let value = match value {
+            UtilityValue::Arbitrary { data_type, value } => {
+                if arbitrary_type(data_type, value, &[DataType::Color]) == Some("color") {
+                    let color = cx.as_color(value, modifier)?;
+                    return colored(cx.with_alpha(color, "var(--tw-drop-shadow-alpha)"));
+                }
+                if modifier.is_some() && alpha.is_none() {
+                    return None;
+                }
+                return sized(value, "var(--tw-drop-shadow-size)");
+            }
+            UtilityValue::Named { value, .. } => value,
+        };
+        let theme_value = cx.theme.get(&[&format!("--drop-shadow-{value}")]).filter(|v| !v.is_empty());
+        let resolved = cx.resolve(Some(value), &["--drop-shadow"]).filter(|v| !v.is_empty());
+        if let (Some(theme_value), Some(resolved)) = (theme_value, resolved) {
+            if modifier.is_some() && alpha.is_none() {
+                return None;
+            }
+            if alpha.is_some() {
+                return sized(theme_value, "var(--tw-drop-shadow-size)");
+            }
+            return sized(theme_value, drop_shadows(resolved));
         }
-        out.into_bump_str()
-    };
-    let drop_shadows = |cx: &Cx<'a, '_>, resolved: &str| {
-        let parts: std::vec::Vec<String> = segment(resolved, b',').into_iter().map(|v| format!("drop-shadow({v})")).collect();
-        cx.str(&parts.join(" "))
-    };
-    r.functional_decl(
-        "drop-shadow",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                return None;
-            };
-            let alpha = match modifier {
-                Some(Modifier::Arbitrary(v)) => Some(v),
-                Some(Modifier::Named(v)) if is_multiple_of_quarter(v) => Some(cx.cat(&[v, "%"])),
-                _ => None,
-            };
-            let sized = |value: &'a str, shadow: &'a str| {
-                let mut nodes = Vec::with_capacity_in(6, cx.alloc);
-                nodes.push(filter_properties(cx));
-                nodes.push(cx.decl_opt("--tw-drop-shadow-alpha", alpha));
-                push_alpha_replaced_drop_shadow(cx, &mut nodes, "--tw-drop-shadow-size", value, alpha, "--tw-drop-shadow-color");
-                nodes.push(cx.decl("--tw-drop-shadow", shadow));
-                nodes.push(cx.decl("filter", FILTER_VALUE));
-                Some(nodes)
-            };
-            let drop_shadows = |resolved: &str| {
-                let parts: std::vec::Vec<String> = segment(resolved, b',').into_iter().map(|v| format!("drop-shadow({v})")).collect();
-                cx.str(&parts.join(" "))
-            };
-            let colored = |color: &'a str| {
-                Some(cx.nodes([
-                    filter_properties(cx),
-                    cx.decl("--tw-drop-shadow-color", color),
-                    cx.decl("--tw-drop-shadow", "var(--tw-drop-shadow-size)"),
-                ]))
-            };
-            let Some(value) = value else {
-                let value = cx.theme.get(&["--drop-shadow"])?;
-                let resolved = cx.resolve(None, &["--drop-shadow"])?;
-                if modifier.is_some() && alpha.is_none() {
-                    return None;
-                }
-                return sized(value, drop_shadows(resolved));
-            };
-            let value = match value {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    if arbitrary_type(data_type, value, &[DataType::Color]) == Some("color") {
-                        let color = cx.as_color(value, modifier)?;
-                        return colored(cx.with_alpha(color, "var(--tw-drop-shadow-alpha)"));
-                    }
-                    if modifier.is_some() && alpha.is_none() {
-                        return None;
-                    }
-                    return sized(value, "var(--tw-drop-shadow-size)");
-                }
-                UtilityValue::Named { value, .. } => value,
-            };
-            let theme_value = cx.theme.get(&[&format!("--drop-shadow-{value}")]).filter(|v| !v.is_empty());
-            let resolved = cx.resolve(Some(value), &["--drop-shadow"]).filter(|v| !v.is_empty());
-            if let (Some(theme_value), Some(resolved)) = (theme_value, resolved) {
-                if modifier.is_some() && alpha.is_none() {
-                    return None;
-                }
-                if alpha.is_some() {
-                    return sized(theme_value, "var(--tw-drop-shadow-size)");
-                }
-                return sized(theme_value, drop_shadows(resolved));
-            }
-            let color = cx.resolve_theme_color(value, modifier, &["--drop-shadow-color", "--color"])?;
-            if color == "inherit" {
-                return colored("inherit");
-            }
-            colored(cx.with_alpha(color, "var(--tw-drop-shadow-alpha)"))
-        },
-        move |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            let sized = |cx: &Cx<'a, '_>, value: &'a str, shadow: &'a str| {
-                Vec::from_iter_in(
-                    [("--tw-drop-shadow-size", drop_shadow_size(cx, value)), ("--tw-drop-shadow", shadow), ("filter", FILTER_VALUE)],
-                    cx.alloc,
-                )
-            };
-            let colored = |cx: &Cx<'a, '_>, color: &'a str| {
-                Vec::from_iter_in([("--tw-drop-shadow-color", color), ("--tw-drop-shadow", "var(--tw-drop-shadow-size)")], cx.alloc)
-            };
-            let Some(value) = value else {
-                let theme_value = cx.theme.get(&["--drop-shadow"])?;
-                let resolved = cx.resolve(None, &["--drop-shadow"])?;
-                return Some(sized(cx, theme_value, drop_shadows(cx, resolved)));
-            };
-            let value = match value {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    if arbitrary_type(data_type, value, &[DataType::Color]) == Some("color") {
-                        let color = cx.as_color(value, None)?;
-                        return Some(colored(cx, cx.with_alpha(color, "var(--tw-drop-shadow-alpha)")));
-                    }
-                    return Some(sized(cx, value, "var(--tw-drop-shadow-size)"));
-                }
-                UtilityValue::Named { value, .. } => value,
-            };
-            let theme_value = cx.theme.get(&[&format!("--drop-shadow-{value}")]).filter(|v| !v.is_empty());
-            let resolved = cx.resolve(Some(value), &["--drop-shadow"]).filter(|v| !v.is_empty());
-            if let (Some(theme_value), Some(resolved)) = (theme_value, resolved) {
-                return Some(sized(cx, theme_value, drop_shadows(cx, resolved)));
-            }
-            let color = cx.resolve_theme_color(value, None, &["--drop-shadow-color", "--color"])?;
-            if color == "inherit" {
-                return Some(colored(cx, "inherit"));
-            }
-            Some(colored(cx, cx.with_alpha(color, "var(--tw-drop-shadow-alpha)")))
-        },
-    );
+        let color = cx.resolve_theme_color(value, modifier, &["--drop-shadow-color", "--color"])?;
+        if color == "inherit" {
+            return colored("inherit");
+        }
+        colored(cx.with_alpha(color, "var(--tw-drop-shadow-alpha)"))
+    });
     r.suggest("drop-shadow", vec![Suggest::color(&["--drop-shadow-color", "--color"]), Suggest::default().keys(&["--drop-shadow"])]);
 
     r.functional(

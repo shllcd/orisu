@@ -1,9 +1,9 @@
 use super::{POSITIONS, REPEATS, Stop, arbitrary_type};
-use crate::utilities::{Cx, DefaultValue, Functional, Named, PERCENT_STEPS_OF_5, Registrar, Suggest, declaration_fn};
+use crate::utilities::{Cx, DefaultValue, Functional, Named, PERCENT_STEPS_OF_5, Registrar, Suggest};
 use orisu_allocator::Vec;
 use orisu_ast::{Node, Nodes};
 use orisu_candidate::{Candidate, CandidateKind, UtilityValue};
-use orisu_parser::infer::{DataType, infer_data_type, is_multiple_of_quarter, is_positive_integer, js_number};
+use orisu_parser::infer::{DataType, infer_data_type, is_positive_integer, js_number};
 
 const MASK_IMAGE: &str = "var(--tw-mask-linear), var(--tw-mask-radial), var(--tw-mask-conic)";
 const ANGLES: [&str; 9] = ["0", "1", "2", "3", "6", "12", "45", "90", "180"];
@@ -113,13 +113,7 @@ fn resolve_stop<'a>(cx: &Cx<'a, '_>, candidate: &Candidate<'a>) -> Option<(&'a s
                 return None;
             }
             match infer_data_type(value, &[DataType::Number, DataType::Percentage])? {
-                DataType::Number => {
-                    cx.resolve(None, &["--spacing"]).filter(|v| !v.is_empty())?;
-                    if !is_multiple_of_quarter(value) {
-                        return None;
-                    }
-                    Some((cx.cat(&["--spacing(", value, ")"]), Stop::Position))
-                }
+                DataType::Number => Some((cx.spacing(value, false)?, Stop::Position)),
                 _ => {
                     if !is_positive_integer(drop_last(value)) {
                         return None;
@@ -135,19 +129,11 @@ fn mask_stop<'a>(
     r: &mut Registrar<'a, '_>,
     name: &str,
     handle: impl for<'t> Fn(&Cx<'a, 't>, &'a str, Stop) -> Option<Nodes<'a>> + Send + Sync + 'a,
-    declarations: impl for<'t> Fn(&Cx<'a, 't>, &'a str, Stop) -> Vec<'a, (&'a str, &'a str)> + Send + Sync + 'a,
 ) {
-    r.functional_decl(
-        name,
-        move |cx, candidate| {
-            let (value, stop) = resolve_stop(cx, candidate)?;
-            handle(cx, value, stop)
-        },
-        move |cx, candidate| {
-            let (value, stop) = resolve_stop(cx, candidate)?;
-            Some(declarations(cx, value, stop))
-        },
-    );
+    r.functional_fn(name, move |cx, candidate| {
+        let (value, stop) = resolve_stop(cx, candidate)?;
+        handle(cx, value, stop)
+    });
     r.suggest(
         name,
         vec![
@@ -206,53 +192,31 @@ fn mask_edge<'a>(r: &mut Registrar<'a, '_>, name: &str, stop: &str, edges: &[&st
             }
         })
         .collect();
-    let declared_edges = edges.clone();
-    mask_stop(
-        r,
-        name,
-        move |cx, v, stop| {
-            let mut nodes = Vec::with_capacity_in(5 + edges.len() * 3, cx.alloc);
-            nodes.push(mask_properties_gradient(cx));
-            nodes.push(mask_properties_edge(cx));
-            nodes.push(cx.decl("mask-image", MASK_IMAGE));
-            nodes.push(cx.decl("mask-composite", "intersect"));
-            nodes.push(cx.decl("--tw-mask-linear", "var(--tw-mask-left), var(--tw-mask-right), var(--tw-mask-bottom), var(--tw-mask-top)"));
-            for edge in &edges {
-                nodes.push(cx.decl(edge.var, edge.gradient));
-                nodes.push(cx.at_root([
-                    cx.property(edge.from_position, Some("0%"), None),
-                    cx.property(edge.to_position, Some("100%"), None),
-                    cx.property(edge.from_color, Some("black"), None),
-                    cx.property(edge.to_color, Some("transparent"), None),
-                ]));
-                nodes.push(cx.decl(
-                    match stop {
-                        Stop::Color => edge.color,
-                        Stop::Position => edge.position,
-                    },
-                    v,
-                ));
-            }
-            Some(nodes)
-        },
-        move |cx, v, stop| {
-            let mut declarations = Vec::with_capacity_in(3 + declared_edges.len() * 2, cx.alloc);
-            declarations.push(("mask-image", MASK_IMAGE));
-            declarations.push(("mask-composite", "intersect"));
-            declarations.push(("--tw-mask-linear", "var(--tw-mask-left), var(--tw-mask-right), var(--tw-mask-bottom), var(--tw-mask-top)"));
-            for edge in &declared_edges {
-                declarations.push((edge.var, edge.gradient));
-                declarations.push((
-                    match stop {
-                        Stop::Color => edge.color,
-                        Stop::Position => edge.position,
-                    },
-                    v,
-                ));
-            }
-            declarations
-        },
-    );
+    mask_stop(r, name, move |cx, v, stop| {
+        let mut nodes = Vec::with_capacity_in(5 + edges.len() * 3, cx.alloc);
+        nodes.push(mask_properties_gradient(cx));
+        nodes.push(mask_properties_edge(cx));
+        nodes.push(cx.decl("mask-image", MASK_IMAGE));
+        nodes.push(cx.decl("mask-composite", "intersect"));
+        nodes.push(cx.decl("--tw-mask-linear", "var(--tw-mask-left), var(--tw-mask-right), var(--tw-mask-bottom), var(--tw-mask-top)"));
+        for edge in &edges {
+            nodes.push(cx.decl(edge.var, edge.gradient));
+            nodes.push(cx.at_root([
+                cx.property(edge.from_position, Some("0%"), None),
+                cx.property(edge.to_position, Some("100%"), None),
+                cx.property(edge.from_color, Some("black"), None),
+                cx.property(edge.to_color, Some("transparent"), None),
+            ]));
+            nodes.push(cx.decl(
+                match stop {
+                    Stop::Color => edge.color,
+                    Stop::Position => edge.position,
+                },
+                v,
+            ));
+        }
+        Some(nodes)
+    });
 }
 
 fn mask_shape_stop<'a>(
@@ -268,45 +232,23 @@ fn mask_shape_stop<'a>(
     let image = r.cat(&[function, "(var(", stops_var, "))"]);
     let color = r.cat(&[var, "-", stop, "-color"]);
     let position = r.cat(&[var, "-", stop, "-position"]);
-    mask_stop(
-        r,
-        &format!("mask-{shape}-{stop}"),
-        move |cx, v, stop| {
-            Some(cx.nodes([
-                mask_properties_gradient(cx),
-                properties(cx),
-                cx.decl("mask-image", MASK_IMAGE),
-                cx.decl("mask-composite", "intersect"),
-                cx.decl(stops_var, stops),
-                cx.decl(var, image),
-                cx.decl(
-                    match stop {
-                        Stop::Color => color,
-                        Stop::Position => position,
-                    },
-                    v,
-                ),
-            ]))
-        },
-        move |cx, v, stop| {
-            Vec::from_iter_in(
-                [
-                    ("mask-image", MASK_IMAGE),
-                    ("mask-composite", "intersect"),
-                    (stops_var, stops),
-                    (var, image),
-                    (
-                        match stop {
-                            Stop::Color => color,
-                            Stop::Position => position,
-                        },
-                        v,
-                    ),
-                ],
-                cx.alloc,
-            )
-        },
-    );
+    mask_stop(r, &format!("mask-{shape}-{stop}"), move |cx, v, stop| {
+        Some(cx.nodes([
+            mask_properties_gradient(cx),
+            properties(cx),
+            cx.decl("mask-image", MASK_IMAGE),
+            cx.decl("mask-composite", "intersect"),
+            cx.decl(stops_var, stops),
+            cx.decl(var, image),
+            cx.decl(
+                match stop {
+                    Stop::Color => color,
+                    Stop::Position => position,
+                },
+                v,
+            ),
+        ]))
+    });
 }
 
 pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
@@ -320,21 +262,12 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
         Some("bg-size" | "length" | "size") => "mask-size",
         _ => "mask-image",
     };
-    r.functional_decl(
-        "mask",
-        move |cx, c| {
-            let CandidateKind::Functional { value: Some(UtilityValue::Arbitrary { data_type, value }), modifier: None, .. } = c.kind else {
-                return None;
-            };
-            cx.one(mask_property(data_type, value), value)
-        },
-        move |cx, c| {
-            let CandidateKind::Functional { value: Some(UtilityValue::Arbitrary { data_type, value }), modifier: None, .. } = c.kind else {
-                return None;
-            };
-            Some(Vec::from_iter_in([(mask_property(data_type, value), value)], cx.alloc))
-        },
-    );
+    r.functional_fn("mask", move |cx, c| {
+        let CandidateKind::Functional { value: Some(UtilityValue::Arbitrary { data_type, value }), modifier: None, .. } = c.kind else {
+            return None;
+        };
+        cx.one(mask_property(data_type, value), value)
+    });
     for value in ["add", "subtract", "intersect", "exclude"] {
         r.static_decls(&format!("mask-{value}"), &[("mask-composite", value)]);
     }
@@ -385,18 +318,7 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
         .negative()
         .default_value(DefaultValue::Null)
         .bare(bare_angle)
-        .negative_bare(negative_bare_angle)
-        .declaration(declaration_fn(|cx, v, _| {
-            Some(Vec::from_iter_in(
-                [
-                    ("mask-image", MASK_IMAGE),
-                    ("mask-composite", "intersect"),
-                    ("--tw-mask-linear", "linear-gradient(var(--tw-mask-linear-stops, var(--tw-mask-linear-position)))"),
-                    ("--tw-mask-linear-position", v),
-                ],
-                cx.alloc,
-            ))
-        })),
+        .negative_bare(negative_bare_angle),
     );
     r.suggest("mask-linear", vec![Suggest::values(&ANGLES).negative(true)]);
     const LINEAR_STOPS: &str = "var(--tw-mask-linear-position), var(--tw-mask-linear-from-color) var(--tw-mask-linear-from-position), var(--tw-mask-linear-to-color) var(--tw-mask-linear-to-position)";
@@ -425,18 +347,7 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
                 cx.decl("--tw-mask-radial-size", v),
             ]))
         })
-        .default_value(DefaultValue::Null)
-        .declaration(declaration_fn(|cx, v, _| {
-            Some(Vec::from_iter_in(
-                [
-                    ("mask-image", MASK_IMAGE),
-                    ("mask-composite", "intersect"),
-                    ("--tw-mask-radial", "radial-gradient(var(--tw-mask-radial-stops, var(--tw-mask-radial-size)))"),
-                    ("--tw-mask-radial-size", v),
-                ],
-                cx.alloc,
-            ))
-        })),
+        .default_value(DefaultValue::Null),
     );
     const RADIAL_STOPS: &str = "var(--tw-mask-radial-shape) var(--tw-mask-radial-size) at var(--tw-mask-radial-position), var(--tw-mask-radial-from-color) var(--tw-mask-radial-from-position), var(--tw-mask-radial-to-color) var(--tw-mask-radial-to-position)";
     for stop in ["from", "to"] {
@@ -458,18 +369,7 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
         .negative()
         .default_value(DefaultValue::Null)
         .bare(bare_angle)
-        .negative_bare(negative_bare_angle)
-        .declaration(declaration_fn(|cx, v, _| {
-            Some(Vec::from_iter_in(
-                [
-                    ("mask-image", MASK_IMAGE),
-                    ("mask-composite", "intersect"),
-                    ("--tw-mask-conic", "conic-gradient(var(--tw-mask-conic-stops, var(--tw-mask-conic-position)))"),
-                    ("--tw-mask-conic-position", v),
-                ],
-                cx.alloc,
-            ))
-        })),
+        .negative_bare(negative_bare_angle),
     );
     r.suggest("mask-conic", vec![Suggest::values(&ANGLES).negative(true)]);
     const CONIC_STOPS: &str = "from var(--tw-mask-conic-position), var(--tw-mask-conic-from-color) var(--tw-mask-conic-from-position), var(--tw-mask-conic-to-color) var(--tw-mask-conic-to-position)";

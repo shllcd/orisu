@@ -4,7 +4,6 @@
 use super::Canon;
 use super::convert::Convert;
 use orisu_allocator::{AllocExt, Allocator, Vec};
-use orisu_candidate::print::print_variant;
 use orisu_candidate::{Registry, Variant, VariantValue};
 use orisu_parser::attribute_selector;
 use orisu_parser::infer::is_positive_integer;
@@ -89,7 +88,7 @@ fn arbitrary_variants<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>) -> V
         if matches!(v, Variant::Compound { .. }) {
             return v;
         }
-        let printed = print_variant(v);
+        let printed = cx.print_variant(v);
         let signature = cx.variant_signature(&printed);
         if !signature.is_valid() {
             return v;
@@ -173,7 +172,8 @@ fn modernize_selector<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>, sele
         return Some((None, parse(cx, &format!("in-[{}]", sp::to_string(&ast[..1], true)))?));
     }
     if top && matches!(ast.first(), Some(SNode::Selector("@media" | "@supports"))) {
-        let target = cx.variant_signature(&print_variant(variant));
+        let printed = cx.print_variant(variant);
+        let target = cx.variant_signature(&printed);
         let mut parsed = vp::parse(&sp::to_string(&ast, true), alloc);
         let mut contains_not = false;
         remove_not(&mut parsed, &mut contains_not);
@@ -181,7 +181,8 @@ fn modernize_selector<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>, sele
         collapse_whitespace(&mut parsed);
         if contains_not {
             let hoisted = parse(cx, &format!("not-[{}]", vp::to_string(&parsed)))?;
-            if target == cx.variant_signature(&print_variant(hoisted)) {
+            let printed = cx.print_variant(hoisted);
+            if target == cx.variant_signature(&printed) {
                 return Some((None, hoisted));
             }
         }
@@ -294,7 +295,10 @@ fn pseudo_variant<'a>(cx: &mut Canon<'a, '_>, variant: &'a Variant<'a>, target: 
             _ => format!("{name}-[{}]", sp::to_string(nodes, true)),
         });
     }
-    if *compound_not && cx.variant_signature(&print_variant(variant)) == cx.variant_signature(&format!("not-[{value}]")) {
+    if *compound_not && {
+        let printed = cx.print_variant(variant);
+        cx.variant_signature(&printed) == cx.variant_signature(&format!("not-[{value}]"))
+    } {
         return Some(format!("[&{value}]"));
     }
     None

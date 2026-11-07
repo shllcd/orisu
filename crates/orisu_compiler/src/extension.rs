@@ -5,24 +5,13 @@ use orisu_theme::Theme;
 
 /// A compatibility layer: extra stylesheets, utilities and theme lookups.
 pub trait Extension<'a> {
-    /// Comment printed first in the output.
-    fn banner(&self) -> Option<&'a str> {
-        None
-    }
+    fn banner(&self) -> &'a str;
 
-    fn stylesheet(&self, uri: &str) -> Option<&'static str> {
-        let _ = uri;
-        None
-    }
+    fn stylesheet(&self, uri: &str) -> Option<&'static str>;
 
     /// Runs right after the built-in utilities are registered.
-    fn register_utilities(&self, utilities: &mut Utilities<'a>, theme: &Theme<'a>, alloc: &'a Allocator) {
-        let _ = (utilities, theme, alloc);
-    }
+    fn register_utilities(&self, utilities: &mut Utilities<'a>, theme: &Theme<'a>, alloc: &'a Allocator);
 
     /// `theme(…)` with a dot path such as `colors.red.500 / 50%`.
-    fn resolve_theme(&self, ds: &Session<'_, 'a>, path: &str) -> Option<&'a str> {
-        let _ = (ds, path);
-        None
-    }
+    fn resolve_theme(&self, ds: &Session<'_, 'a>, path: &str) -> Option<&'a str>;
 }

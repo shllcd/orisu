@@ -11,6 +11,8 @@ orisu_compiler.workspace = true
 orisu_compat_tailwind.workspace = true
 orisu_canonical.workspace = true
 orisu_diagnostics.workspace = true
+orisu_mangle.workspace = true
+orisu_merge.workspace = true
 orisu_optimizer.workspace = true
 serde_json.workspace = true
 

@@ -2,7 +2,7 @@
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
 use orisu_allocator::{AllocExt, Allocator};
-use orisu_parser::bytes::{ByteTable, trim};
+use orisu_ast::bytes::{ByteTable, trim};
 use orisu_parser::decode::decode_arbitrary_value;
 use orisu_parser::segment::{is_valid_arbitrary, segment};
 use smallvec::SmallVec;
@@ -100,6 +100,8 @@ pub trait Registry<'a> {
     fn has_functional_utility(&self, root: &str) -> bool;
     fn variant_kind(&self, root: &str) -> Option<VariantKind>;
     fn compounds_with(&self, root: &str, variant: &Variant<'a>) -> bool;
+    /// Whether the compound variant `root` folds its `/modifier` into its inner variant.
+    fn modifier_in_value(&self, root: &str) -> bool;
     /// Cached entry point that recursively calls [`parse_variant`].
     fn parse_variant(&mut self, raw: &'a str) -> Option<&'a Variant<'a>>;
 }
@@ -177,12 +179,8 @@ pub fn parse_candidate<'a, R: Registry<'a> + ?Sized>(input: &'a str, registry: &
     }
     let mut base_without_modifier = parts[0];
     let modifier_segment = parts.get(1).copied();
-    let modifier = match modifier_segment {
-        None => None,
-        Some(segment) => match parse_modifier(segment, alloc) {
-            None => return out,
-            some => some,
-        },
+    let Some(modifier) = parse_optional_modifier(modifier_segment, alloc) else {
+        return out;
     };
 
     if first(base_without_modifier) == Some(b'[') {
@@ -280,13 +278,13 @@ pub fn parse_candidate<'a, R: Registry<'a> + ?Sized>(input: &'a str, registry: &
                 return out;
             }
             let wrapped = match data_type {
-                None => alloc.concat(&["[var(", value, ")]"]),
-                Some(data_type) => alloc.concat(&["[", data_type, ":var(", value, ")]"]),
+                None => alloc.concat(&["[", wrap_var(value, alloc), "]"]),
+                Some(data_type) => alloc.concat(&["[", data_type, ":", wrap_var(value, alloc), "]"]),
             };
             push_root(root, Some(wrapped), &mut out);
         }
         _ => {
-            for (root, value) in Roots::new(base_without_modifier, |root| registry.has_functional_utility(root)) {
+            for (root, value, ()) in Roots::new(base_without_modifier, |root| registry.has_functional_utility(root).then_some(())) {
                 if !push_root(root, value, &mut out) {
                     break;
                 }
@@ -301,20 +299,39 @@ fn decode_valid_arbitrary_value<'a>(raw: &'a str, alloc: &'a Allocator) -> Optio
     is_valid_arbitrary(raw).then(|| decode_arbitrary_value(raw, alloc))
 }
 
+/// Decodes the inside of `[…]`, rejecting unbalanced and blank values.
+fn bracketed_value<'a>(inner: &'a str, alloc: &'a Allocator) -> Option<&'a str> {
+    decode_valid_arbitrary_value(inner, alloc).filter(|value| !is_blank(value))
+}
+
+/// The value `(--name)` stands for.
+pub fn wrap_var<'a>(name: &str, alloc: &'a Allocator) -> &'a str {
+    alloc.concat(&["var(", name, ")"])
+}
+
+/// The `--name` a printed `(--name)` shorthand holds when `value` is a lone `var()`; inverse of [`wrap_var`].
+pub(crate) fn unwrap_var(value: &str) -> &str {
+    &value[4..value.len() - 1]
+}
+
+/// `None` when the modifier is present but invalid.
+fn parse_optional_modifier<'a>(modifier: Option<&'a str>, alloc: &'a Allocator) -> Option<Option<Modifier<'a>>> {
+    match modifier {
+        None => Some(None),
+        Some(m) => parse_modifier(m, alloc).map(Some),
+    }
+}
+
 pub fn parse_modifier<'a>(modifier: &'a str, alloc: &'a Allocator) -> Option<Modifier<'a>> {
     if first(modifier) == Some(b'[') && last(modifier) == Some(b']') {
-        let value = decode_valid_arbitrary_value(&modifier[1..modifier.len() - 1], alloc)?;
-        if is_blank(value) {
-            return None;
-        }
-        return Some(Modifier::Arbitrary(value));
+        return bracketed_value(&modifier[1..modifier.len() - 1], alloc).map(Modifier::Arbitrary);
     }
     if first(modifier) == Some(b'(') && last(modifier) == Some(b')') {
         let inner = &modifier[1..modifier.len() - 1];
         if !starts_with_dashes(inner) || !is_valid_arbitrary(inner) {
             return None;
         }
-        return Some(Modifier::Arbitrary(decode_arbitrary_value(alloc.concat(&["var(", inner, ")"]), alloc)));
+        return Some(Modifier::Arbitrary(decode_arbitrary_value(wrap_var(inner, alloc), alloc)));
     }
     is_valid_named_value(modifier).then_some(Modifier::Named(modifier))
 }
@@ -325,10 +342,7 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
         if variant.as_bytes().get(1) == Some(&b'@') && variant.contains('&') {
             return None;
         }
-        let mut selector = decode_valid_arbitrary_value(&variant[1..variant.len() - 1], alloc)?;
-        if is_blank(selector) {
-            return None;
-        }
+        let mut selector = bracketed_value(&variant[1..variant.len() - 1], alloc)?;
         let relative = matches!(first(selector), Some(b'>' | b'+' | b'~'));
         if !relative && first(selector) != Some(b'@') && !selector.contains('&') {
             selector = alloc.concat(&["&:is(", selector, ")"]);
@@ -344,8 +358,8 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
     let mut modifier = parts.get(1).copied();
 
     let (root, mut value) = 'compound: {
-        for (root, value) in Roots::new(without_modifier, |root| registry.variant_kind(root).is_some()) {
-            match registry.variant_kind(root)? {
+        for (root, value, kind) in Roots::new(without_modifier, |root| registry.variant_kind(root)) {
+            match kind {
                 VariantKind::Static => {
                     if value.is_some() || modifier.is_some() {
                         return None;
@@ -353,10 +367,7 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
                     return Some(Variant::Static { root });
                 }
                 VariantKind::Functional => {
-                    let parsed_modifier = match modifier {
-                        None => None,
-                        Some(m) => Some(parse_modifier(m, alloc)?),
-                    };
+                    let parsed_modifier = parse_optional_modifier(modifier, alloc)?;
                     let Some(value) = value else {
                         return Some(Variant::Functional { root, modifier: parsed_modifier, value: None });
                     };
@@ -364,10 +375,7 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
                         if first(value) != Some(b'[') {
                             continue;
                         }
-                        let arbitrary = decode_valid_arbitrary_value(&value[1..value.len() - 1], alloc)?;
-                        if is_blank(arbitrary) {
-                            return None;
-                        }
+                        let arbitrary = bracketed_value(&value[1..value.len() - 1], alloc)?;
                         return Some(Variant::Functional {
                             root,
                             modifier: parsed_modifier,
@@ -385,7 +393,7 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
                         return Some(Variant::Functional {
                             root,
                             modifier: parsed_modifier,
-                            value: Some(VariantValue::Arbitrary(alloc.concat(&["var(", arbitrary, ")"]))),
+                            value: Some(VariantValue::Arbitrary(wrap_var(arbitrary, alloc))),
                         });
                     }
                     if !is_valid_named_value(value) {
@@ -400,7 +408,7 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
     };
     if let Some(m) = modifier
         && !m.is_empty()
-        && matches!(root, "not" | "has" | "in")
+        && registry.modifier_in_value(root)
     {
         value = alloc.concat(&[value, "/", m]);
         modifier = None;
@@ -409,15 +417,16 @@ pub fn parse_variant<'a, R: Registry<'a> + ?Sized>(variant: &'a str, registry: &
     if !registry.compounds_with(root, sub) {
         return None;
     }
-    let parsed_modifier = match modifier {
-        None => None,
-        Some(m) => Some(parse_modifier(m, alloc)?),
-    };
+    let parsed_modifier = parse_optional_modifier(modifier, alloc)?;
     Some(Variant::Compound { root, modifier: parsed_modifier, variant: sub })
 }
 
-/// Lazy port of Tailwind's `findRoots`: yields `(root, value)` splits at each `-`, longest root first.
-pub struct Roots<'a, F> {
+/// The one root whose value follows it without a dash: `@md`, `@[30rem]`.
+pub const ROOT_WITHOUT_DASH: &str = "@";
+
+/// Lazy port of Tailwind's `findRoots`: yields `(root, value, found)` splits at each `-`, longest root first,
+/// for roots where `exists` finds something.
+struct Roots<'a, F> {
     input: &'a str,
     exists: F,
     state: RootsState,
@@ -431,9 +440,9 @@ enum RootsState {
     Done,
 }
 
-impl<'a, F: FnMut(&str) -> bool> Roots<'a, F> {
+impl<'a, T, F: FnMut(&str) -> Option<T>> Roots<'a, F> {
     #[inline]
-    pub fn new(input: &'a str, exists: F) -> Self {
+    fn new(input: &'a str, exists: F) -> Self {
         Self { input, exists, state: RootsState::Whole }
     }
 
@@ -443,8 +452,8 @@ impl<'a, F: FnMut(&str) -> bool> Roots<'a, F> {
     }
 }
 
-impl<'a, F: FnMut(&str) -> bool> Iterator for Roots<'a, F> {
-    type Item = (&'a str, Option<&'a str>);
+impl<'a, T, F: FnMut(&str) -> Option<T>> Iterator for Roots<'a, F> {
+    type Item = (&'a str, Option<&'a str>, T);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -454,8 +463,8 @@ impl<'a, F: FnMut(&str) -> bool> Iterator for Roots<'a, F> {
                         Some(idx) => RootsState::Dash(idx),
                         None => RootsState::At,
                     };
-                    if (self.exists)(self.input) {
-                        return Some((self.input, None));
+                    if let Some(found) = (self.exists)(self.input) {
+                        return Some((self.input, None, found));
                     }
                 }
                 RootsState::Dash(idx) => {
@@ -468,19 +477,21 @@ impl<'a, F: FnMut(&str) -> bool> Iterator for Roots<'a, F> {
                         None => RootsState::At,
                     };
                     let root = &self.input[..idx];
-                    if (self.exists)(root) {
+                    if let Some(found) = (self.exists)(root) {
                         let value = &self.input[idx + 1..];
-                        if value.is_empty() || (root == "@" && (self.exists)("@")) {
+                        if value.is_empty() || root == ROOT_WITHOUT_DASH {
                             self.state = RootsState::At;
                             continue;
                         }
-                        return Some((root, Some(value)));
+                        return Some((root, Some(value), found));
                     }
                 }
                 RootsState::At => {
                     self.state = RootsState::Done;
-                    if first(self.input) == Some(b'@') && (self.exists)("@") {
-                        return Some(("@", Some(&self.input[1..])));
+                    if self.input.starts_with(ROOT_WITHOUT_DASH)
+                        && let Some(found) = (self.exists)(ROOT_WITHOUT_DASH)
+                    {
+                        return Some((ROOT_WITHOUT_DASH, Some(&self.input[ROOT_WITHOUT_DASH.len()..]), found));
                     }
                 }
                 RootsState::Done => return None,

@@ -16,3 +16,5 @@ oxc_sourcemap = "=8.1.2"
 indexmap.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true

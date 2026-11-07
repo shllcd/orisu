@@ -1,21 +1,22 @@
 use orisu_ignore::gitignore::{Gitignore, GitignoreBuilder};
+use std::ffi::OsStr;
 use std::sync;
 
-/// All the default rules for auto source detection.
-///
-/// This includes:
-///
-/// - Ignoring common content directories like `.git` and `node_modules`
-/// - Ignoring file extensions we definitely don't want to include like `.css` and `.scss`
-/// - Ignoring common binary file extensions like `.png` and `.jpg`
-/// - Ignoring common files like `yarn.lock` and `package-lock.json`
-///
+/// The entries of a fixture list, one per line, skipping blank lines and `#` comments.
+pub fn list(text: &'static str) -> impl Iterator<Item = &'static str> {
+    text.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#'))
+}
+
+fn joined(text: &'static str) -> String {
+    list(text).collect::<Vec<_>>().join(",")
+}
+
+/// The default rules of auto source detection: the walk skips these directories, extensions and files.
 pub static RULES: sync::LazyLock<Vec<Gitignore>> = sync::LazyLock::new(|| {
     let mut builder = GitignoreBuilder::new("");
-
-    builder.add_line(None, &IGNORED_CONTENT_DIRS_GLOB).unwrap();
-    builder.add_line(None, &IGNORED_EXTENSIONS_GLOB).unwrap();
-    builder.add_line(None, &IGNORED_FILES_GLOB).unwrap();
+    builder.add_line(None, &format!("{{{}}}/", IGNORED_CONTENT_DIRS.join(","))).unwrap();
+    builder.add_line(None, &format!("*.{{{}}}", joined(include_str!("fixtures/ignored-extensions.txt")))).unwrap();
+    builder.add_line(None, &format!("{{{}}}", joined(include_str!("fixtures/ignored-files.txt")))).unwrap();
 
     let mut file_only_builder = GitignoreBuilder::new("");
     file_only_builder.only_on_files(true).add_line(None, &BINARY_EXTENSIONS_GLOB).unwrap();
@@ -23,18 +24,13 @@ pub static RULES: sync::LazyLock<Vec<Gitignore>> = sync::LazyLock::new(|| {
     vec![builder.build().unwrap(), file_only_builder.build().unwrap()]
 });
 
-pub static IGNORED_CONTENT_DIRS: sync::LazyLock<Vec<&'static str>> =
-    sync::LazyLock::new(|| include_str!("fixtures/ignored-content-dirs.txt").trim().lines().collect());
+static IGNORED_CONTENT_DIRS: sync::LazyLock<Vec<&'static str>> =
+    sync::LazyLock::new(|| list(include_str!("fixtures/ignored-content-dirs.txt")).collect());
 
-static IGNORED_CONTENT_DIRS_GLOB: sync::LazyLock<String> = sync::LazyLock::new(|| format!("{{{}}}/", IGNORED_CONTENT_DIRS.join(",")));
+/// Whether a directory named `name` holds dependencies, build output or version control data rather than sources.
+pub fn is_ignored_content_dir(name: &OsStr) -> bool {
+    IGNORED_CONTENT_DIRS.iter().any(|dir| name == *dir)
+}
 
-static IGNORED_EXTENSIONS_GLOB: sync::LazyLock<String> = sync::LazyLock::new(|| {
-    format!("*.{{{}}}", include_str!("fixtures/ignored-extensions.txt").trim().lines().collect::<Vec<&str>>().join(","))
-});
-
-pub static BINARY_EXTENSIONS_GLOB: sync::LazyLock<String> = sync::LazyLock::new(|| {
-    format!("*.{{{}}}", include_str!("fixtures/binary-extensions.txt").trim().lines().collect::<Vec<&str>>().join(","))
-});
-
-static IGNORED_FILES_GLOB: sync::LazyLock<String> =
-    sync::LazyLock::new(|| format!("{{{}}}", include_str!("fixtures/ignored-files.txt").trim().lines().collect::<Vec<&str>>().join(",")));
+pub static BINARY_EXTENSIONS_GLOB: sync::LazyLock<String> =
+    sync::LazyLock::new(|| format!("*.{{{}}}", joined(include_str!("fixtures/binary-extensions.txt"))));

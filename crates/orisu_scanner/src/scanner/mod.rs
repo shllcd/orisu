@@ -1,88 +1,55 @@
 pub mod auto_source_detection;
-pub mod detect_sources;
+mod detect_sources;
 pub mod sources;
 
 use crate::GlobEntry;
-use crate::attributify::Attributify;
+use crate::attributify;
 use crate::cache::{self, Cache, Guard, Stat};
+use crate::extractor::pre_processors::pre_process;
 use crate::extractor::{Extracted, Extractor};
 use crate::glob::optimize_patterns;
 use crate::manifest;
 use crate::scanner::detect_sources::resolve_globs;
-use crate::scanner::sources::{PublicSourceEntry, SourceEntry, Sources, public_source_entries_to_private_source_entries};
+use crate::scanner::sources::{PublicSourceEntry, SourceEntry, inside_git_repo, public_source_entries_to_private_source_entries};
 use auto_source_detection::BINARY_EXTENSIONS_GLOB;
 use bstr::ByteSlice;
 use fast_glob::glob_match;
+use orisu_candidate::attributify::Attributify;
 use orisu_ignore::{WalkBuilder, git_exclude_files, gitignore::GitignoreBuilder, is_normal_path, path_starts_with};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// A file with its extension, or content with the extension of the file it stands for.
 #[derive(Debug, Clone)]
 pub enum ChangedContent {
     File(PathBuf, String),
     Content(String, String),
 }
 
-#[derive(Debug, Clone)]
-pub struct ScanOptions {
-    /// Base path to start scanning from
-    pub base: Option<String>,
-
-    /// Glob sources
-    pub sources: Vec<GlobEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ScanResult {
-    pub candidates: Vec<String>,
-    pub files: Vec<String>,
-    pub globs: Vec<GlobEntry>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct Scanner {
-    /// Content sources
-    sources: Sources,
-
-    /// The walker to detect all files that we have to scan
+    sources: Vec<SourceEntry>,
     walker: Option<WalkBuilder>,
-
-    /// All found extensions
-    extensions: FxHashSet<String>,
-
-    /// All files that we have to scan
-    files: FxHashSet<PathBuf>,
-
-    /// All directories, sub-directories, etc… we saw during source detection
-    dirs: FxHashSet<PathBuf>,
-
-    /// All generated globs, used for setting up watchers
-    globs: Option<Vec<GlobEntry>>,
-
-    /// Track unique set of candidates
-    candidates: FxHashSet<String>,
-
-    /// Track mtimes for files so incremental scans can skip unchanged files.
-    mtimes: FxHashMap<PathBuf, Stat>,
-
-    /// Files that were scanned during the last `scan()` call.
-    scanned_files: Vec<String>,
-
-    /// Whether we've completed at least one full scan. When false, we skip
-    /// mtime tracking entirely so the initial build stays fast.
-    has_scanned_once: bool,
-
-    /// Whether sources have been scanned since the last `scan()` call
-    sources_scanned: bool,
-
-    attributify: Option<Attributify>,
-
-    cache: Option<Cache>,
-
     /// Manifests of installed libraries whose sources are not scanned.
     manifests: Vec<PathBuf>,
+    attributify: Option<Attributify>,
+    cache: Option<Cache>,
+    /// Whether `files`, `dirs` and `extensions` hold the result of a walk.
+    walked: bool,
+    files: FxHashSet<PathBuf>,
+    dirs: FxHashSet<PathBuf>,
+    extensions: FxHashSet<String>,
+    /// The globs for watchers, computed once per walk.
+    globs: Option<Vec<GlobEntry>>,
+    candidates: FxHashSet<String>,
+    /// The stats files had when last scanned, so that later scans skip unchanged files.
+    stats: FxHashMap<PathBuf, Stat>,
+    /// The files the last scan read.
+    scanned_files: Vec<String>,
+    /// Whether a scan ran; the first one prunes the cache.
+    scanned: bool,
 }
 
 impl Scanner {
@@ -100,10 +67,8 @@ impl Scanner {
                 None => true,
             })
             .collect();
-        let sources = Sources::new(public_source_entries_to_private_source_entries(sources));
-
+        let sources = public_source_entries_to_private_source_entries(sources);
         let walker = create_walker(&sources, None);
-
         Self { sources, walker, manifests, ..Default::default() }
     }
 
@@ -131,134 +96,112 @@ impl Scanner {
 
     /// Scans like [`Scanner::scan`], returning only the candidates that no earlier scan found.
     pub fn scan_new(&mut self) -> Vec<String> {
-        self.sources_scanned = false;
-
-        let prune = !self.has_scanned_once;
-        let (content_paths, css_files, files, mut extracted) = self.discover_sources();
-
-        extracted.extend(extract_files(content_paths, self.attributify.as_ref()));
-        let fresh = self.extract_candidates(vec![], css_files, extracted);
-        self.scanned_files = files;
-        if let Some(cache) = &mut self.cache {
-            let _ = cache.save(prune);
+        let mut found = FxHashSet::default();
+        let mut content_files = vec![];
+        let mut css_files = vec![];
+        let mut changed_files = vec![];
+        for entry in self.walk() {
+            let changed = match entry.stat {
+                Some(stat) => self.stats.insert(entry.path.clone(), stat) != Some(stat),
+                None => true,
+            };
+            if !changed {
+                continue;
+            }
+            if let Some(file) = entry.path.to_str() {
+                changed_files.push(file.to_owned());
+            }
+            match entry.kind {
+                EntryKind::Manifest => found.extend(manifest::read(&entry.path)),
+                _ => match extension(&entry.path) {
+                    "css" => css_files.push(entry.path),
+                    extension => {
+                        let extension = extension.to_owned();
+                        content_files.push((entry.path, extension, entry.stat));
+                    }
+                },
+            }
         }
+        self.stats.retain(|path, _| self.files.contains(path));
+
+        let attributify = self.attributify.as_ref();
+        found.extend(match &mut self.cache {
+            Some(cache) => extract_cached(cache, content_files, attributify),
+            None => extract_all(
+                content_files.into_iter().map(|(path, extension, _)| ChangedContent::File(path, extension)).collect(),
+                attributify,
+            ),
+        });
+        found.extend(extract_css_variables(css_files));
+
+        let fresh = self.add_candidates(found);
+        changed_files.par_sort_unstable();
+        self.scanned_files = changed_files;
+        if let Some(cache) = &mut self.cache {
+            let _ = cache.save(!self.scanned);
+        }
+        self.scanned = true;
         fresh
     }
 
     pub fn scan_content(&mut self, changed_content: Vec<ChangedContent>) -> Vec<String> {
-        let (changed_files, changed_contents) = changed_content.into_iter().partition::<Vec<_>, _>(|x| match x {
-            ChangedContent::File(_, _) => true,
-            ChangedContent::Content(_, _) => false,
-        });
-
-        let mut content_to_scan: Vec<ChangedContent> = changed_contents;
-
-        let changed_files = changed_files
-            .into_iter()
-            .filter_map(|changed_content| match changed_content {
+        let mut content_to_scan = vec![];
+        let mut unknown_files = vec![];
+        for changed in changed_content {
+            match changed {
                 ChangedContent::File(file, extension) => {
                     let Ok(file) = dunce::canonicalize(file) else {
-                        return None;
+                        continue;
                     };
-                    Some(ChangedContent::File(file, extension))
+                    if self.files.contains(&file) {
+                        content_to_scan.push(ChangedContent::File(file, extension));
+                    } else {
+                        unknown_files.push((file, extension));
+                    }
                 }
-                _ => unreachable!(),
-            })
-            .collect::<Vec<_>>();
+                content => content_to_scan.push(content),
+            }
+        }
 
-        let (known_files, mut new_unknown_files) = changed_files.into_iter().partition::<Vec<_>, _>(|changed_file| match changed_file {
-            ChangedContent::Content(_, _) => unreachable!(),
-            ChangedContent::File(file, _) => self.files.contains(file),
-        });
-
-        content_to_scan.extend(known_files);
-
-        if !new_unknown_files.is_empty()
-            && let Some(walk_builder) = create_walker(
-                &self.sources,
-                Some(
-                    new_unknown_files
-                        .iter()
-                        .filter_map(|file| if let ChangedContent::File(file, _) = file { Some(file.clone()) } else { None })
-                        .collect(),
-                ),
-            )
+        if !unknown_files.is_empty()
+            && let Some(walker) = create_walker(&self.sources, Some(unknown_files.iter().map(|(file, _)| file.clone()).collect()))
         {
-            for entry in walk_builder.build().filter_map(Result::ok) {
+            for entry in walker.build().filter_map(Result::ok) {
                 let path = entry.path();
                 if !path.is_file() {
                     continue;
                 }
-
-                let mut drop_file_indexes = vec![];
-                for (idx, changed_file) in new_unknown_files.iter().enumerate().rev() {
-                    let ChangedContent::File(file, _) = changed_file else {
-                        continue;
-                    };
-
-                    if file == path {
-                        self.files.insert(path.to_path_buf());
-                        content_to_scan.push(changed_file.clone());
-                        drop_file_indexes.push(idx);
+                unknown_files.retain(|(file, extension)| {
+                    if file != path {
+                        return true;
                     }
-                }
-
-                if !drop_file_indexes.is_empty() {
-                    drop_file_indexes.into_iter().for_each(|idx| {
-                        new_unknown_files.remove(idx);
-                    });
-                }
-
-                if new_unknown_files.is_empty() {
+                    self.files.insert(file.clone());
+                    content_to_scan.push(ChangedContent::File(file.clone(), extension.clone()));
+                    false
+                });
+                if unknown_files.is_empty() {
                     break;
                 }
             }
         }
 
-        let blobs = read_all_files(content_to_scan);
-        self.extract_candidates(blobs, vec![], FxHashSet::default())
+        let found = extract_all(content_to_scan, self.attributify.as_ref());
+        self.add_candidates(found)
     }
 
-    fn extract_candidates(&mut self, blobs: Vec<Vec<u8>>, css_files: Vec<PathBuf>, extracted: FxHashSet<String>) -> Vec<String> {
-        let attributes = self.attributify.as_ref().map(|attributify| {
-            blobs
-                .par_iter()
-                .fold(FxHashSet::default, |mut out, blob| {
-                    attributify.extract(blob, &mut out);
-                    out
-                })
-                .reduce(FxHashSet::default, |mut a, b| {
-                    a.extend(b);
-                    a
-                })
-        });
-        let mut new_candidates = parse_all_blobs(&blobs);
-        new_candidates.extend(attributes.into_iter().flatten());
-        new_candidates.extend(extracted);
-
-        if !css_files.is_empty() {
-            let css_variables = extract_css_variables(&read_all_files(
-                css_files.into_iter().map(|file| ChangedContent::File(file, "css".into())).collect(),
-            ));
-
-            new_candidates.extend(css_variables);
-        }
-
-        for existing in self.candidates.iter() {
-            new_candidates.remove(existing);
-        }
-
-        self.candidates.extend(new_candidates.iter().cloned());
-
-        let mut result: Vec<String> = new_candidates.into_iter().collect();
+    /// Keeps the candidates in `found` and returns the ones not seen before, sorted.
+    fn add_candidates(&mut self, mut found: FxHashSet<String>) -> Vec<String> {
+        found.retain(|candidate| !self.candidates.contains(candidate));
+        self.candidates.extend(found.iter().cloned());
+        let mut result: Vec<String> = found.into_iter().collect();
         result.par_sort_unstable();
-
         result
     }
 
     pub fn get_files(&mut self) -> Vec<String> {
-        let _ = self.discover_sources();
-
+        if !self.walked {
+            self.walk();
+        }
         self.files.par_iter().filter_map(|x| x.clone().into_os_string().into_string().ok()).collect()
     }
 
@@ -267,163 +210,150 @@ impl Scanner {
     }
 
     pub fn get_globs(&mut self) -> Vec<GlobEntry> {
+        if !self.walked {
+            self.walk();
+        }
         if let Some(globs) = &self.globs {
             return globs.clone();
         }
 
-        let _ = self.discover_sources();
-
         let mut globs = vec![];
-        for source in self.sources.iter() {
+        for source in &self.sources {
             match source {
                 SourceEntry::Auto { base } | SourceEntry::External { base } => {
                     globs.extend(resolve_globs(base.to_path_buf(), &self.dirs, &self.extensions));
                 }
-                SourceEntry::Pattern { base, pattern } => {
-                    globs.push(GlobEntry { base: base.to_string_lossy().to_string(), pattern: pattern.to_string() });
-                }
-                _ => {}
+                SourceEntry::Pattern { .. } => globs.push(source.into()),
+                SourceEntry::Ignored { .. } => {}
             }
         }
-
-        globs = optimize_patterns(&globs);
-
+        let globs = optimize_patterns(&globs);
         self.globs = Some(globs.clone());
-
         globs
     }
 
     pub fn get_normalized_sources(&self) -> Vec<GlobEntry> {
-        self.sources
-            .iter()
-            .filter_map(|source| match source {
-                SourceEntry::Auto { base } | SourceEntry::External { base } => {
-                    Some(GlobEntry { base: base.to_string_lossy().to_string(), pattern: "**/*".to_string() })
-                }
-                SourceEntry::Pattern { base, pattern } => {
-                    Some(GlobEntry { base: base.to_string_lossy().to_string(), pattern: pattern.to_string() })
-                }
-                _ => None,
-            })
-            .collect()
+        self.sources.iter().filter(|source| !matches!(source, SourceEntry::Ignored { .. })).map(GlobEntry::from).collect()
     }
 
-    pub fn get_candidates_with_positions(&mut self, changed_content: ChangedContent) -> Vec<(String, usize)> {
-        let content = read_changed_content(changed_content).unwrap_or_default();
-        let original_content = &content;
+    /// The candidates of one file with their byte offsets in it, before variant group expansion.
+    pub fn get_candidates_with_positions(&self, changed_content: ChangedContent) -> Vec<(String, usize)> {
+        /// Stands in for `-[]`, which ends no candidate, so that editors get the position of a candidate like `bg-[]`
+        /// while its value is being typed. It has the same length, so the offsets stay valid.
+        const EMPTY_ARBITRARY_PLACEHOLDER: &str = "XYZ";
 
-        let content = content.replace("-[]", "XYZ");
+        let original =
+            read_changed_content(changed_content).map(|(content, extension)| pre_process(content, &extension)).unwrap_or_default();
+        let content = original.replace("-[]", EMPTY_ARBITRARY_PLACEHOLDER);
         let offset = content.as_ptr() as usize;
 
-        let mut extractor = Extractor::new(&content[..]);
-
-        extractor
+        Extractor::new(&content[..])
             .extract()
             .into_par_iter()
             .flat_map(|extracted| match extracted {
                 Extracted::Candidate(s) => {
                     let i = s.as_ptr() as usize - offset;
-                    let original = &original_content[i..i + s.len()];
-                    let bytes = if original.contains_str("-[]") { original } else { s };
+                    let written = &original[i..i + s.len()];
+                    let bytes = if written.contains_str("-[]") { written } else { s };
                     Some((std::str::from_utf8(bytes).ok()?.to_owned(), i))
                 }
-
-                _ => None,
+                Extracted::CssVariable(_) => None,
             })
             .collect()
     }
 
-    /// Content files to extract with their extensions, CSS files, the changed files and candidates already extracted from
-    /// caches and manifests.
-    fn discover_sources(&mut self) -> (Vec<ContentFile>, Vec<PathBuf>, Vec<String>, FxHashSet<String>) {
-        if self.sources_scanned {
-            return Default::default();
-        }
-        self.sources_scanned = true;
-
-        let mut all_entries = match (&mut self.cache, &mut self.walker) {
+    /// Walks the sources into `files`, `dirs` and `extensions`, returning the file and manifest entries.
+    fn walk(&mut self) -> Vec<WalkEntry> {
+        let mut entries = match (&mut self.cache, &mut self.walker) {
             (Some(cache), Some(walker)) => walk_cached(cache, walker, &self.sources),
             (None, Some(walker)) => walk_parallel(walker),
             (_, None) => vec![],
         };
-        for manifest in &self.manifests {
-            all_entries.push((manifest.clone(), false, MANIFEST.to_owned(), Stat::at(manifest)));
-        }
+        entries.extend(self.manifests.iter().map(|path| WalkEntry { path: path.clone(), kind: EntryKind::Manifest, stat: Stat::at(path) }));
 
-        let mut css_files: Vec<PathBuf> = vec![];
-        let mut content_paths: Vec<(PathBuf, String, Option<Stat>)> = vec![];
-        let mut changed_files = vec![];
-        let mut manifest_paths: Vec<PathBuf> = vec![];
-
+        self.walked = true;
         self.files.clear();
         self.dirs.clear();
         self.extensions.clear();
         self.globs = None;
 
-        for (path, is_dir, extension, mtime) in all_entries {
-            if is_dir {
-                self.dirs.insert(path);
-            } else {
-                if !self.files.insert(path.clone()) {
-                    continue;
+        let mut files = vec![];
+        for entry in entries {
+            match entry.kind {
+                EntryKind::Dir => {
+                    self.dirs.insert(entry.path);
                 }
-                self.extensions.insert(extension.clone());
-
-                let changed = if self.has_scanned_once {
-                    match mtime {
-                        Some(mtime) => {
-                            let prev = self.mtimes.insert(path.clone(), mtime);
-                            prev.is_none_or(|prev| prev != mtime)
-                        }
-                        None => true,
+                _ if !self.files.insert(entry.path.clone()) => {}
+                kind => {
+                    if kind == EntryKind::File {
+                        self.extensions.insert(extension(&entry.path).to_owned());
                     }
-                } else {
-                    if let Some(mtime) = mtime {
-                        self.mtimes.insert(path.clone(), mtime);
-                    }
-
-                    true
-                };
-
-                if !changed {
-                    continue;
-                }
-
-                if let Ok(file) = path.clone().into_os_string().into_string() {
-                    changed_files.push(file);
-                }
-
-                match extension.as_str() {
-                    "css" => css_files.push(path),
-                    MANIFEST => manifest_paths.push(path),
-                    _ => content_paths.push((path, extension, mtime)),
+                    files.push(entry);
                 }
             }
         }
-
-        self.mtimes.retain(|path, _| self.files.contains(path));
-
-        let mut extracted: FxHashSet<String> = manifest_paths.iter().flat_map(|path| manifest::read(path)).collect();
-        let content_paths = match &mut self.cache {
-            Some(cache) => {
-                extracted.extend(extract_cached(cache, content_paths, self.attributify.as_ref()));
-                vec![]
-            }
-            None => content_paths.into_iter().map(|(path, ext, _)| (path, ext)).collect(),
-        };
-
-        if !self.has_scanned_once {
-            self.has_scanned_once = true;
-        }
-
-        changed_files.par_sort_unstable();
-
-        (content_paths, css_files, changed_files, extracted)
+        files
     }
 }
 
-/// The extension that marks manifest entries among the walked files.
-const MANIFEST: &str = "\0manifest";
+/// The candidates the scanner finds in one file, without attributify.
+pub fn file_candidates(content: Vec<u8>, extension: &str) -> FxHashSet<String> {
+    let mut out = FxHashSet::default();
+    extract_file(content, extension, None, &mut out, &mut FxHashSet::default());
+    out
+}
+
+/// Adds the candidates of a file to `out`, skipping lines in `seen`, the lines already extracted.
+fn extract_file(
+    content: Vec<u8>,
+    extension: &str,
+    attributify: Option<&Attributify>,
+    out: &mut FxHashSet<String>,
+    seen: &mut FxHashSet<Box<[u8]>>,
+) {
+    let content = pre_process(content, extension);
+    let content = orisu_candidate::group::expand(&content).unwrap_or(content);
+    for line in content.split(|x| *x == b'\n').filter(|line| !line.is_empty()) {
+        if seen.contains(line) {
+            continue;
+        }
+        seen.insert(line.into());
+        for extracted in Extractor::new(line).extract() {
+            let (Extracted::Candidate(bytes) | Extracted::CssVariable(bytes)) = extracted;
+            let Ok(candidate) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            if !out.contains(candidate) {
+                out.insert(candidate.to_owned());
+            }
+        }
+    }
+    if let Some(attributify) = attributify {
+        attributify::extract(attributify, &content, out);
+    }
+}
+
+/// Candidates of `contents`, each read, extracted and dropped in one pass so that only the files in flight are in memory.
+fn extract_all(contents: Vec<ChangedContent>, attributify: Option<&Attributify>) -> FxHashSet<String> {
+    contents
+        .into_par_iter()
+        .fold(Default::default, |(mut out, mut seen): (FxHashSet<String>, FxHashSet<Box<[u8]>>), changed| {
+            if let Some((content, extension)) = read_changed_content(changed) {
+                extract_file(content, &extension, attributify, &mut out, &mut seen);
+            }
+            (out, seen)
+        })
+        .map(|(out, _)| out)
+        .reduce(FxHashSet::default, union)
+}
+
+fn union(mut a: FxHashSet<String>, mut b: FxHashSet<String>) -> FxHashSet<String> {
+    if a.len() < b.len() {
+        std::mem::swap(&mut a, &mut b);
+    }
+    a.extend(b);
+    a
+}
 
 /// Candidates of `files`: cached ones by stat or content, the rest extracted one file at a time and added to `cache`.
 fn extract_cached(cache: &mut Cache, files: Vec<(PathBuf, String, Option<Stat>)>, attributify: Option<&Attributify>) -> FxHashSet<String> {
@@ -451,11 +381,8 @@ fn extract_cached(cache: &mut Cache, files: Vec<(PathBuf, String, Option<Stat>)>
     let fresh: Vec<_> = misses
         .into_par_iter()
         .map(|(key, content, extension, path, stat)| {
-            let blob = expand_variant_groups(pre_process_input(content, &extension));
-            let mut candidates = parse_all_blobs(std::slice::from_ref(&blob));
-            if let Some(attributify) = attributify {
-                attributify.extract(&blob, &mut candidates);
-            }
+            let mut candidates = FxHashSet::default();
+            extract_file(content, &extension, attributify, &mut candidates, &mut FxHashSet::default());
             let mut candidates: Vec<String> = candidates.into_iter().collect();
             candidates.sort_unstable();
             (key, candidates, path, stat)
@@ -469,142 +396,63 @@ fn extract_cached(cache: &mut Cache, files: Vec<(PathBuf, String, Option<Stat>)>
     out
 }
 
-/// Candidates of `files`, each read, extracted and dropped in one pass so that only the files in flight are in memory.
-fn extract_files(files: Vec<ContentFile>, attributify: Option<&Attributify>) -> FxHashSet<String> {
+fn read_changed_content(changed: ChangedContent) -> Option<(Vec<u8>, String)> {
+    match changed {
+        ChangedContent::File(file, extension) => Some((std::fs::read(&file).ok()?, extension)),
+        ChangedContent::Content(contents, extension) => Some((contents.into_bytes(), extension)),
+    }
+}
+
+/// The CSS variables that `files` read with `var(…)`.
+fn extract_css_variables(files: Vec<PathBuf>) -> FxHashSet<String> {
     files
         .into_par_iter()
-        .fold(Default::default, |(mut set, mut seen): (FxHashSet<String>, FxHashSet<Box<[u8]>>), (path, extension)| {
-            let Ok(content) = std::fs::read(&path) else {
-                return (set, seen);
-            };
-            let blob = expand_variant_groups(pre_process_input(content, &extension));
-            extract_lines(&blob, &mut set, &mut seen);
-            if let Some(attributify) = attributify {
-                attributify.extract(&blob, &mut set);
+        .filter_map(|file| std::fs::read(file).ok())
+        .map(|content| orisu_candidate::group::expand(&content).unwrap_or(content))
+        .fold(FxHashSet::default, |mut out, content| {
+            for line in content.split(|x| *x == b'\n').filter(|line| !line.is_empty()) {
+                for extracted in Extractor::new(line).extract_variables_from_css() {
+                    let (Extracted::Candidate(bytes) | Extracted::CssVariable(bytes)) = extracted;
+                    if let Ok(variable) = std::str::from_utf8(bytes) {
+                        out.insert(variable.to_owned());
+                    }
+                }
             }
-            (set, seen)
+            out
         })
-        .map(|(set, _)| set)
-        .reduce(FxHashSet::default, |mut a, mut b| {
-            if a.len() < b.len() {
-                std::mem::swap(&mut a, &mut b);
-            }
-            a.extend(b);
-            a
-        })
+        .reduce(FxHashSet::default, union)
 }
 
-/// The candidates the scanner finds in one file, without attributify.
-pub fn file_candidates(content: Vec<u8>, extension: &str) -> FxHashSet<String> {
-    let blob = expand_variant_groups(pre_process_input(content, extension));
-    let mut set = FxHashSet::default();
-    extract_lines(&blob, &mut set, &mut FxHashSet::default());
-    set
+fn extension(path: &Path) -> &str {
+    path.extension().and_then(|x| x.to_str()).unwrap_or_default()
 }
 
-fn extract_lines(blob: &[u8], set: &mut FxHashSet<String>, seen: &mut FxHashSet<Box<[u8]>>) {
-    for line in blob.split(|x| *x == b'\n').filter(|line| !line.is_empty()) {
-        if seen.contains(line) {
-            continue;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Dir,
+    File,
+    /// A manifest standing in for the sources of an installed library.
+    Manifest,
+}
+
+#[derive(Debug)]
+struct WalkEntry {
+    path: PathBuf,
+    kind: EntryKind,
+    /// `None` for directories and files whose metadata can't be read.
+    stat: Option<Stat>,
+}
+
+impl WalkEntry {
+    fn new(path: PathBuf, is_dir: bool) -> Self {
+        match is_dir {
+            true => Self { path, kind: EntryKind::Dir, stat: None },
+            false => {
+                let stat = Stat::at(&path);
+                Self { path, kind: EntryKind::File, stat }
+            }
         }
-        seen.insert(line.into());
-        for extracted in Extractor::new(line).extract() {
-            let (Extracted::Candidate(bytes) | Extracted::CssVariable(bytes)) = extracted;
-            let Ok(candidate) = std::str::from_utf8(bytes) else {
-                continue;
-            };
-            if !set.contains(candidate) {
-                set.insert(candidate.to_owned());
-            }
-        }
     }
-}
-
-fn read_changed_content(c: ChangedContent) -> Option<Vec<u8>> {
-    let (content, extension) = match c {
-        ChangedContent::File(file, extension) => (std::fs::read(&file).ok()?, extension),
-
-        ChangedContent::Content(contents, extension) => (contents.into_bytes(), extension),
-    };
-
-    Some(pre_process_input(content, &extension))
-}
-
-pub fn pre_process_input(content: Vec<u8>, extension: &str) -> Vec<u8> {
-    use crate::extractor::pre_processors::*;
-
-    match extension {
-        "clj" | "cljs" | "cljc" => Clojure.process(&content),
-        "heex" | "eex" | "ex" | "exs" => Elixir.process(&content),
-        "cshtml" | "razor" => Razor.process(&content),
-        "haml" => Haml.process(&content),
-        "json" | "jsonl" | "ndjson" => Json.process(&content),
-        "md" | "mdx" => Markdown.process(&content),
-        "pug" => Pug.process(&content),
-        "rb" | "erb" => Ruby.process(&content),
-        "slim" | "slang" => Slim.process(&content),
-        "svelte" => Svelte.process(&content),
-        "rs" => Rust.process(&content),
-        "tt" | "tt2" | "tx" => TemplateToolkit.process(&content),
-        "twig" => Twig.process(&content),
-        "vue" => Vue.process(&content),
-        _ => content,
-    }
-}
-
-fn read_all_files(changed_content: Vec<ChangedContent>) -> Vec<Vec<u8>> {
-    changed_content.into_par_iter().filter_map(read_changed_content).map(expand_variant_groups).collect()
-}
-
-fn expand_variant_groups(content: Vec<u8>) -> Vec<u8> {
-    orisu_candidate::group::expand(&content).unwrap_or(content)
-}
-
-fn extract_css_variables(blobs: &[Vec<u8>]) -> FxHashSet<String> {
-    extract(blobs, |mut extractor| extractor.extract_variables_from_css())
-}
-
-fn parse_all_blobs(blobs: &[Vec<u8>]) -> FxHashSet<String> {
-    extract(blobs, |mut extractor| extractor.extract())
-}
-
-fn extract<H>(blobs: &[Vec<u8>], handle: H) -> FxHashSet<String>
-where
-    H: Fn(Extractor) -> Vec<Extracted> + std::marker::Sync,
-{
-    blobs
-        .par_iter()
-        .flat_map(|blob| blob.par_split(|x| *x == b'\n'))
-        .fold(FxHashSet::default, |mut set, blob| {
-            if !blob.is_empty() {
-                set.extend(handle(crate::extractor::Extractor::new(blob)).into_iter().map(|x| match x {
-                    Extracted::Candidate(bytes) => bytes,
-                    Extracted::CssVariable(bytes) => bytes,
-                }));
-            }
-            set
-        })
-        .reduce(Default::default, |mut a, mut b| {
-            if a.len() < b.len() {
-                std::mem::swap(&mut a, &mut b);
-            }
-            a.extend(b);
-            a
-        })
-        .into_iter()
-        .filter_map(|bytes| std::str::from_utf8(bytes).ok().map(str::to_owned))
-        .collect()
-}
-
-type WalkEntry = (PathBuf, bool, String, Option<Stat>);
-
-fn walk_entry(path: PathBuf, is_dir: bool) -> WalkEntry {
-    if is_dir {
-        return (path, true, String::new(), None);
-    }
-    let ext = path.extension().and_then(|x| x.to_str()).unwrap_or_default().to_owned();
-    let stat = Stat::at(&path);
-    (path, false, ext, stat)
 }
 
 /// The stats a directory's listing and ignore rules depend on: its own, those of its ignore files and those of the git
@@ -626,25 +474,23 @@ fn dir_guards(dir: &Path) -> Vec<Guard> {
 
 /// Reuses the entries of the cached walk while no directory it entered and no ignore file it read changed; otherwise
 /// walks and caches the result. Guards are taken after the walk, so one that changed during it is too fresh to keep.
-fn walk_cached(cache: &mut Cache, walker: &mut WalkBuilder, sources: &Sources) -> Vec<WalkEntry> {
+fn walk_cached(cache: &mut Cache, walker: &mut WalkBuilder, sources: &[SourceEntry]) -> Vec<WalkEntry> {
     if let Some(entries) = cache.walked() {
-        return entries.par_iter().map(|(path, is_dir)| walk_entry(path.clone(), *is_dir)).collect();
+        return entries.par_iter().map(|(path, is_dir)| WalkEntry::new(path.clone(), *is_dir)).collect();
     }
     let start = cache::now();
     let entries = walk_parallel(walker);
-    let mut dirs: FxHashSet<&Path> = entries.iter().filter(|(_, is_dir, _, _)| *is_dir).map(|(path, _, _, _)| path.as_path()).collect();
-    for source in sources.iter() {
+    let mut dirs: FxHashSet<&Path> =
+        entries.iter().filter(|entry| entry.kind == EntryKind::Dir).map(|entry| entry.path.as_path()).collect();
+    for source in sources {
         if let SourceEntry::Auto { base } | SourceEntry::Pattern { base, .. } | SourceEntry::External { base } = source {
             dirs.extend(base.ancestors());
         }
     }
     let guards = dirs.into_par_iter().flat_map_iter(dir_guards).collect();
-    cache.set_walk(guards, entries.iter().map(|(path, is_dir, _, _)| (path.clone(), *is_dir)).collect(), start);
+    cache.set_walk(guards, entries.iter().map(|entry| (entry.path.clone(), entry.kind == EntryKind::Dir)).collect(), start);
     entries
 }
-
-/// A content file and its extension.
-type ContentFile = (PathBuf, String);
 
 fn walk_parallel(walker: &mut WalkBuilder) -> Vec<WalkEntry> {
     struct FlushOnDrop {
@@ -670,8 +516,8 @@ fn walk_parallel(walker: &mut WalkBuilder) -> Vec<WalkEntry> {
                 return orisu_ignore::WalkState::Continue;
             };
 
-            let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-            buf.local.push(walk_entry(entry.into_path(), is_dir));
+            let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+            buf.local.push(WalkEntry::new(entry.into_path(), is_dir));
 
             if buf.local.len() >= 256 {
                 buf.shared.lock().unwrap().append(&mut buf.local);
@@ -684,84 +530,44 @@ fn walk_parallel(walker: &mut WalkBuilder) -> Vec<WalkEntry> {
     Arc::try_unwrap(collected).unwrap().into_inner().unwrap()
 }
 
-/// Sets up a WalkBuilder with all source roots, gitignore rules, and source pattern matching.
+/// Sets up a walker over all source roots with the default ignore rules, the `.gitignore` files and the source patterns.
 /// With `targets`, the walk only enters directories that contain one of them.
-fn create_walker(sources: &Sources, targets: Option<Vec<PathBuf>>) -> Option<WalkBuilder> {
-    let mut other_roots: FxHashSet<&PathBuf> = FxHashSet::default();
-    let mut first_root: Option<&PathBuf> = None;
-
-    let mut ignores: Vec<(&PathBuf, Vec<String>)> = Default::default();
+fn create_walker(sources: &[SourceEntry], targets: Option<Vec<PathBuf>>) -> Option<WalkBuilder> {
+    let mut roots: Vec<&PathBuf> = vec![];
+    let mut ignores: Vec<(&PathBuf, Vec<String>)> = vec![];
     let mut emit = |base, pattern| match ignores.last_mut() {
-        Some((prev_base, patterns)) if *prev_base == base => {
-            patterns.push(pattern);
-        }
-        _ => {
-            ignores.push((base, vec![pattern]));
-        }
+        Some((prev_base, patterns)) if *prev_base == base => patterns.push(pattern),
+        _ => ignores.push((base, vec![pattern])),
     };
 
-    for source in sources.iter() {
+    for source in sources {
         match source {
-            SourceEntry::Auto { base } => {
-                if first_root.is_none() {
-                    first_root = Some(base);
-                } else {
-                    other_roots.insert(base);
-                }
-            }
+            SourceEntry::Auto { base } => roots.push(base),
             SourceEntry::Pattern { base, pattern } => {
-                let pattern = pattern.to_owned();
-
-                if first_root.is_none() {
-                    first_root = Some(base);
-                } else {
-                    other_roots.insert(base);
-                }
-
+                roots.push(base);
                 if !pattern.contains("**") {
-                    emit(base, format!("!{}", pattern));
-                } else {
-                    if let Some(extension) = Path::new(&pattern).extension() {
-                        emit(base, format!("!*.{}", extension.to_string_lossy()));
-                    }
+                    emit(base, format!("!{pattern}"));
+                } else if let Some(extension) = Path::new(pattern).extension() {
+                    emit(base, format!("!*.{}", extension.to_string_lossy()));
                 }
             }
-            SourceEntry::Ignored { base, pattern } => {
-                emit(base, pattern.to_owned());
-            }
+            SourceEntry::Ignored { base, pattern } => emit(base, pattern.to_owned()),
             SourceEntry::External { base } => {
-                if first_root.is_none() {
-                    first_root = Some(base);
-                } else {
-                    other_roots.insert(base);
-                }
-
+                roots.push(base);
                 emit(base, "!/**/*".to_owned());
-
                 emit(base, BINARY_EXTENSIONS_GLOB.clone());
             }
         }
     }
 
-    let mut builder = WalkBuilder::new(first_root?);
-
-    builder.follow_links(true);
-
-    builder.hidden(false);
-
-    builder.git_global(false);
-
-    builder.require_git(false);
-
-    for parent in first_root?.ancestors() {
-        if parent.join(".git").exists() {
-            builder.require_git(true);
-            break;
-        }
-    }
-
+    let (first_root, other_roots) = roots.split_first()?;
+    let mut builder = WalkBuilder::new(first_root);
+    builder.follow_links(true).hidden(false).git_global(false).require_git(inside_git_repo(first_root));
+    let mut added = FxHashSet::default();
     for root in other_roots {
-        builder.add(root);
+        if added.insert(root) {
+            builder.add(root);
+        }
     }
 
     for ignore in auto_source_detection::RULES.iter() {
@@ -771,10 +577,11 @@ fn create_walker(sources: &Sources, targets: Option<Vec<PathBuf>>) -> Option<Wal
     for (base, patterns) in ignores {
         let mut ignore_builder = GitignoreBuilder::new(base);
         for pattern in patterns {
-            ignore_builder.add_line(None, &pattern).unwrap();
+            let _ = ignore_builder.add_line(None, &pattern);
         }
-        let ignore = ignore_builder.build().unwrap();
-        builder.add_gitignore(ignore);
+        if let Ok(ignore) = ignore_builder.build() {
+            builder.add_gitignore(ignore);
+        }
     }
 
     let auto_bases: Vec<(PathBuf, bool)> = sources
@@ -802,39 +609,21 @@ fn create_walker(sources: &Sources, targets: Option<Vec<PathBuf>>) -> Option<Wal
             return false;
         }
 
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            let mut matches = false;
-
-            let normal = is_normal_path(path);
-            for (base, base_is_normal) in &auto_bases {
-                if path_starts_with(path, base, normal && *base_is_normal) {
-                    matches = true;
-                    break;
-                }
-            }
-
-            if !matches {
-                for (base, pattern) in &pattern_sources {
-                    let remainder = path.strip_prefix(base);
-                    if remainder.is_ok_and(|remainder| {
-                        let mut path_str = remainder.to_string_lossy().to_string();
-                        if !path_str.starts_with("/") {
-                            path_str = format!("/{path_str}");
-                        }
-                        glob_match(pattern, path_str.as_bytes())
-                    }) {
-                        matches = true;
-                        break;
-                    }
-                }
-            }
-
-            if !matches {
-                return false;
-            }
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            return true;
         }
 
-        true
+        let normal = is_normal_path(path);
+        auto_bases.iter().any(|(base, base_is_normal)| path_starts_with(path, base, normal && *base_is_normal))
+            || pattern_sources.iter().any(|(base, pattern)| {
+                path.strip_prefix(base).is_ok_and(|remainder| {
+                    let mut path_str = remainder.to_string_lossy().to_string();
+                    if !path_str.starts_with("/") {
+                        path_str = format!("/{path_str}");
+                    }
+                    glob_match(pattern, path_str.as_bytes())
+                })
+            })
     });
 
     Some(builder)

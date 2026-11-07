@@ -4,17 +4,12 @@ use orisu_ignore::gitignore::Gitignore;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Component, Path, PathBuf};
 
-use super::auto_source_detection::IGNORED_CONTENT_DIRS;
+use super::auto_source_detection::is_ignored_content_dir;
 
 #[derive(Debug, Clone)]
 pub struct PublicSourceEntry {
-    /// Base path of the glob
     pub base: String,
-
-    /// Glob pattern
     pub pattern: String,
-
-    /// Negated flag
     pub negated: bool,
 }
 
@@ -61,82 +56,12 @@ pub enum SourceEntry {
     External { base: PathBuf },
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Sources {
-    sources: Vec<SourceEntry>,
-}
-
-impl Sources {
-    pub fn new(sources: Vec<SourceEntry>) -> Self {
-        Self { sources }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &SourceEntry> {
-        self.sources.iter()
-    }
-}
-
-/// When dealing with a pattern, then it could be that we end up with:
+/// Restricts the walk below the base of each pattern that no unrestricted source covers to what the pattern can match.
 ///
-/// ```json
-/// { base: '/some/folder', pattern: 'foo.ts' }
-/// ```
-///
-/// If we just emit `!foo.ts` for the `/some/folder` path, then _everything_ else in that folder
-/// would still be walked (but the result will be ignored).
-///
-/// Instead, we have to ensure that we ignore everything in that folder _except_ for the `foo.ts`
-/// pattern.
-///
-/// This should be equivalent to:
-/// ```gitignore
-/// *
-/// !foo.ts
-/// ```
-///
-/// However, we have to be careful that we don't start ignoring files/folders that already exist.
-/// ```css
-/// @source "./some/folder/foo.ts";
-/// @source "./some/folder/bar.ts";
-/// ```
-/// Would result in:
-/// ```json
-/// { base: '/some/folder', pattern: 'foo.ts' }
-/// { base: '/some/folder', pattern: 'bar.ts' }
-/// ```
-///
-/// If we were to blindly emit `*` for each pattern, then the `.gitignore` equivalent would look like
-/// this:
-/// ```gitignore
-/// *
-/// !foo.ts
-/// *
-/// !bar.ts
-/// ```
-///
-/// This would result in ignoring the `foo.ts` file as well. Therefore we only want to insert
-/// this `*` pattern when nothing else exists yet.
-///
-/// There is another problem that we need to solve. Let's say you have a pattern that contains a `*`
-/// in the pattern:
-/// ```css
-/// @source './src/ba*/*.html';
-/// ```
-///
-/// This would result in
-/// ```json
-/// { base: '/src', pattern: '/ba*/*.html' }
-/// ```
-///
-/// If we now inject the `*` pattern for the `/src` folder, then we wouldn't scan any `ba*` folders
-/// (e.g. `bar` or `baz`). For this, we have to make sure that we add inverse patterns for these
-/// folders. This would essentially result in:
-/// ```gitignore
-/// *                     ← ignore everything
-/// !/ba*/                ← except for the `ba*/` pattern, so we scan these folders
-/// !/ba*/*.html          ← then ensure we scan the `*.html` files in it as well
-/// ```
-///
+/// `{ base: '/some/folder', pattern: 'foo.ts' }` alone would still walk all of `/some/folder`, so the base gets an
+/// ignore-everything rule (`*`, or `/*` when another root is nested below it) that the pattern then re-includes. The rule is
+/// added once per base, so that `foo.ts` and `bar.ts` in the same folder don't ignore each other. Each directory on the way
+/// to the matched files is re-included too (`!/ba*/` for `/ba*/*.html`), or the walk would never enter it.
 fn expand_restricted_patterns(sources: Vec<SourceEntry>) -> Vec<SourceEntry> {
     let unrestricted_roots = sources
         .iter()
@@ -345,8 +270,7 @@ fn path_to_posix_string(path: &Path) -> String {
 /// + { base: '/src', pattern: '**/*.html'}
 /// ```
 ///
-/// 3. Convert to private SourceEntry
-///
+/// 3. Convert to private SourceEntry, turning auto sources ignored by a `.gitignore` into external ones
 pub fn public_source_entries_to_private_source_entries(sources: Vec<PublicSourceEntry>) -> Vec<SourceEntry> {
     let expanded_globs = sources
         .into_iter()
@@ -378,7 +302,7 @@ pub fn public_source_entries_to_private_source_entries(sources: Vec<PublicSource
             let mut source: SourceEntry = public_source.into();
 
             if let SourceEntry::Auto { ref base } = source {
-                let inside_git_repo = base.ancestors().any(|dir| dir.join(".git").exists());
+                let inside_git_repo = inside_git_repo(base);
 
                 for dir in base.ancestors() {
                     let gitignore = gitignores.entry(dir.to_path_buf()).or_insert_with(|| {
@@ -411,7 +335,6 @@ pub fn public_source_entries_to_private_source_entries(sources: Vec<PublicSource
     expand_restricted_patterns(sources)
 }
 
-/// Convert a public source entry to a source entry
 impl From<PublicSourceEntry> for SourceEntry {
     fn from(value: PublicSourceEntry) -> Self {
         if value.negated {
@@ -424,32 +347,11 @@ impl From<PublicSourceEntry> for SourceEntry {
             return SourceEntry::Pattern { base: value.base.into(), pattern: value.pattern };
         }
 
-        let inside_ignored_content_dir = IGNORED_CONTENT_DIRS.iter().any(|dir| {
-            value.base.contains(&format!("{}{}{}", std::path::MAIN_SEPARATOR, dir, std::path::MAIN_SEPARATOR))
-                || value.base.ends_with(&format!("{}{}", std::path::MAIN_SEPARATOR, dir))
-        });
+        let inside_ignored_content_dir = Path::new(&value.base).components().any(|part| is_ignored_content_dir(part.as_os_str()));
 
         match inside_ignored_content_dir {
             false => SourceEntry::Auto { base: value.base.into() },
             true => SourceEntry::External { base: value.base.into() },
-        }
-    }
-}
-
-impl From<GlobEntry> for SourceEntry {
-    fn from(value: GlobEntry) -> Self {
-        SourceEntry::Pattern { base: PathBuf::from(value.base), pattern: value.pattern }
-    }
-}
-
-impl From<SourceEntry> for GlobEntry {
-    fn from(value: SourceEntry) -> Self {
-        match value {
-            SourceEntry::Auto { base } | SourceEntry::External { base } => {
-                GlobEntry { base: base.to_string_lossy().into(), pattern: "**/*".into() }
-            }
-            SourceEntry::Pattern { base, pattern } => GlobEntry { base: base.to_string_lossy().into(), pattern: pattern.clone() },
-            SourceEntry::Ignored { base, pattern } => GlobEntry { base: base.to_string_lossy().into(), pattern: pattern.clone() },
         }
     }
 }
@@ -464,4 +366,8 @@ impl From<&SourceEntry> for GlobEntry {
             SourceEntry::Ignored { base, pattern } => GlobEntry { base: base.to_string_lossy().into(), pattern: pattern.clone() },
         }
     }
+}
+
+pub fn inside_git_repo(path: &Path) -> bool {
+    path.ancestors().any(|dir| dir.join(".git").exists())
 }

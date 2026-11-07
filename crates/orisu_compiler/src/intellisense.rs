@@ -56,15 +56,13 @@ fn class_items(ds: &DesignSystem<'_>, keep: impl Fn(&str) -> bool) -> std::vec::
         items.entry(name.clone()).or_insert_with(|| ClassItem { utility: name, fraction: false, modifiers: IndexSet::default() })
     }
     for utility in ds.utilities.keys(UtilityKind::Static) {
-        if ds.utilities.completions(utility, &ds.theme).is_empty() {
+        if !ds.utilities.has_completions(utility) {
             continue;
         }
-        let entry = item(&mut items, utility.to_owned());
-        entry.fraction = false;
-        entry.modifiers.clear();
+        item(&mut items, utility.to_owned());
     }
     for utility in ds.utilities.keys(UtilityKind::Functional) {
-        for group in ds.utilities.completions_filtered(utility, &ds.theme, &keep) {
+        for group in ds.utilities.completions(utility, &ds.theme, &keep) {
             let modifiers: std::vec::Vec<&String> = group.modifiers.iter().filter(|m| keep(m)).collect();
             for value in &group.values {
                 let fraction = value.as_deref().is_some_and(is_fraction);
@@ -129,16 +127,21 @@ pub fn variants<'a>(ds: &DesignSystem<'a>) -> std::vec::Vec<VariantInfo<'a>> {
             name: root,
             is_arbitrary: entry.kind != VariantKind::Static,
             values: ds.variants.completions(root, &ds.theme),
-            has_dash: root != "@",
+            has_dash: has_dash(root),
         })
         .collect()
+}
+
+/// Whether `root` and its value are joined by a dash, as in `aria-checked` but not `@md`.
+fn has_dash(root: &str) -> bool {
+    root != "@"
 }
 
 /// Selectors produced by `root[-value][/modifier]`, as v3-style nested strings.
 pub fn variant_selectors(ds: &mut Session<'_, '_>, root: &str, value: Option<&str>, modifier: Option<&str>) -> std::vec::Vec<String> {
     let mut name = root.to_owned();
     if let Some(value) = value.filter(|v| !v.is_empty()) {
-        if root != "@" {
+        if has_dash(root) {
             name.push('-');
         }
         name.push_str(value);

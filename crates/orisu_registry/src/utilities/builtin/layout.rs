@@ -1,6 +1,5 @@
 use super::{FRAC, NEG, NEG_FRAC, PLAIN, bare_deg, bare_integer, bare_percent, bare_strict_integer_repeat, spacing_bare};
 use crate::utilities::{Cx, DefaultValue, Functional, ONE_TO_12, ONE_TO_13, Registrar, Suggest};
-use orisu_allocator::Vec;
 use orisu_ast::Node;
 use orisu_candidate::{CandidateKind, UtilityValue};
 use orisu_parser::compare::{Direction, compare_breakpoints, dimension};
@@ -51,10 +50,8 @@ fn border_spacing_properties<'a>(cx: &Cx<'a, '_>) -> Node<'a> {
 const TRANSFORM_VALUE: &str = "var(--tw-rotate-x, ) var(--tw-rotate-y, ) var(--tw-rotate-z, ) var(--tw-skew-x, ) var(--tw-skew-y, )";
 
 fn is_zero_spacing(value: &str) -> bool {
-    if value == "--spacing(0)" || value == "--spacing(-0)" {
-        return true;
-    }
-    matches!(dimension(value), Some((n, unit)) if n == 0.0 && (unit.is_none() || is_length(value)))
+    matches!(value, "--spacing(0)" | "--spacing(-0)")
+        || matches!(dimension(value), Some((n, unit)) if n == 0.0 && (unit.is_none() || is_length(value)))
 }
 
 pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
@@ -327,13 +324,9 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     r.static_decls("max-w-none", &[("max-width", "none")]);
     r.static_decls("max-h-none", &[("max-height", "none")]);
 
-    r.spacing_declarations(
-        "size",
-        &["--size", "--spacing"],
-        FRAC,
-        |cx, v| Some(cx.nodes([cx.decl("--tw-sort", "size"), cx.decl("width", v), cx.decl("height", v)])),
-        |cx, v| Vec::from_iter_in([("--tw-sort", "size"), ("width", v), ("height", v)], cx.alloc),
-    );
+    r.spacing("size", &["--size", "--spacing"], FRAC, |cx, v| {
+        Some(cx.nodes([cx.decl("--tw-sort", "size"), cx.decl("width", v), cx.decl("height", v)]))
+    });
     for (name, namespaces, property) in [
         ("w", &["--width", "--spacing", "--container"][..], "width"),
         ("min-w", &["--min-width", "--spacing", "--container"], "min-width"),
@@ -503,20 +496,14 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
             cx.decl("translate", TRANSLATE),
         ]))
     });
-    r.spacing_declarations(
-        "translate",
-        &["--translate", "--spacing"],
-        NEG_FRAC,
-        |cx, v| {
-            Some(cx.nodes([
-                translate_properties(cx),
-                cx.decl("--tw-translate-x", v),
-                cx.decl("--tw-translate-y", v),
-                cx.decl("translate", TRANSLATE),
-            ]))
-        },
-        |cx, v| Vec::from_iter_in([("--tw-translate-x", v), ("--tw-translate-y", v), ("translate", TRANSLATE)], cx.alloc),
-    );
+    r.spacing("translate", &["--translate", "--spacing"], NEG_FRAC, |cx, v| {
+        Some(cx.nodes([
+            translate_properties(cx),
+            cx.decl("--tw-translate-x", v),
+            cx.decl("--tw-translate-y", v),
+            cx.decl("translate", TRANSLATE),
+        ]))
+    });
     for axis in ["x", "y"] {
         let property = r.cat(&["--tw-translate-", axis]);
         r.static_fn(&format!("-translate-{axis}-full"), move |cx, _| {
@@ -525,21 +512,13 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
         r.static_fn(&format!("translate-{axis}-full"), move |cx, _| {
             Some(cx.nodes([translate_properties(cx), cx.decl(property, "100%"), cx.decl("translate", TRANSLATE)]))
         });
-        r.spacing_declarations(
-            &format!("translate-{axis}"),
-            &["--translate", "--spacing"],
-            NEG_FRAC,
-            move |cx, v| Some(cx.nodes([translate_properties(cx), cx.decl(property, v), cx.decl("translate", TRANSLATE)])),
-            move |cx, v| Vec::from_iter_in([(property, v), ("translate", TRANSLATE)], cx.alloc),
-        );
+        r.spacing(&format!("translate-{axis}"), &["--translate", "--spacing"], NEG_FRAC, move |cx, v| {
+            Some(cx.nodes([translate_properties(cx), cx.decl(property, v), cx.decl("translate", TRANSLATE)]))
+        });
     }
-    r.spacing_declarations(
-        "translate-z",
-        &["--translate", "--spacing"],
-        NEG,
-        |cx, v| Some(cx.nodes([translate_properties(cx), cx.decl("--tw-translate-z", v), cx.decl("translate", TRANSLATE_3D)])),
-        |cx, v| Vec::from_iter_in([("--tw-translate-z", v), ("translate", TRANSLATE_3D)], cx.alloc),
-    );
+    r.spacing("translate-z", &["--translate", "--spacing"], NEG, |cx, v| {
+        Some(cx.nodes([translate_properties(cx), cx.decl("--tw-translate-z", v), cx.decl("translate", TRANSLATE_3D)]))
+    });
     r.static_fn("translate-3d", |cx, _| Some(cx.nodes([translate_properties(cx), cx.decl("translate", TRANSLATE_3D)])));
 
     r.static_decls("scale-none", &[("scale", "none")]);
@@ -1022,18 +1001,8 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     }
 
     r.static_decls("accent-auto", &[("accent-color", "auto")]);
-    r.color_decl(
-        "accent",
-        &["--accent-color", "--color"],
-        |cx, v| cx.one("accent-color", v),
-        |cx, v| Vec::from_iter_in([("accent-color", v)], cx.alloc),
-    );
-    r.color_decl(
-        "caret",
-        &["--caret-color", "--color"],
-        |cx, v| cx.one("caret-color", v),
-        |cx, v| Vec::from_iter_in([("caret-color", v)], cx.alloc),
-    );
+    r.color("accent", &["--accent-color", "--color"], |cx, v| cx.one("accent-color", v));
+    r.color("caret", &["--caret-color", "--color"], |cx, v| cx.one("caret-color", v));
     r.color("divide", &["--divide-color", "--border-color", "--color"], |cx, v| {
         Some(cx.nodes([Node::Rule {
             selector: ":where(& > :not(:last-child))",
@@ -1093,23 +1062,16 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     r.static_decls("scrollbar-thin", &[("scrollbar-width", "thin")]);
     r.static_decls("scrollbar-none", &[("scrollbar-width", "none")]);
     for (name, property) in [("scrollbar-thumb", "--tw-scrollbar-thumb"), ("scrollbar-track", "--tw-scrollbar-track")] {
-        r.color_decl(
-            name,
-            &["--color"],
-            move |cx, v| {
-                Some(cx.nodes([
-                    cx.at_root([
-                        cx.property("--tw-scrollbar-thumb", Some("#0000"), Some("<color>")),
-                        cx.property("--tw-scrollbar-track", Some("#0000"), Some("<color>")),
-                    ]),
-                    cx.decl(property, v),
-                    cx.decl("scrollbar-color", "var(--tw-scrollbar-thumb) var(--tw-scrollbar-track)"),
-                ]))
-            },
-            move |cx, v| {
-                Vec::from_iter_in([(property, v), ("scrollbar-color", "var(--tw-scrollbar-thumb) var(--tw-scrollbar-track)")], cx.alloc)
-            },
-        );
+        r.color(name, &["--color"], move |cx, v| {
+            Some(cx.nodes([
+                cx.at_root([
+                    cx.property("--tw-scrollbar-thumb", Some("#0000"), Some("<color>")),
+                    cx.property("--tw-scrollbar-track", Some("#0000"), Some("<color>")),
+                ]),
+                cx.decl(property, v),
+                cx.decl("scrollbar-color", "var(--tw-scrollbar-thumb) var(--tw-scrollbar-track)"),
+            ]))
+        });
     }
     r.static_decls("scrollbar-gutter-auto", &[("scrollbar-gutter", "auto")]);
     r.static_decls("scrollbar-gutter-stable", &[("scrollbar-gutter", "stable")]);

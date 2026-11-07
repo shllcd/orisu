@@ -1,17 +1,17 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use napi::bindgen_prelude::{Either, FnArgs, Function, Null};
-use napi::{Error, Result};
+use napi::bindgen_prelude::{Either, FnArgs, Function, Null, Unknown};
+use napi::{Env, Error, Result};
 use napi_derive::napi;
 use orisu_allocator::Allocator;
 use orisu_candidate::print::print_candidate;
-use orisu_canonical::Canonicalizer;
-use orisu_compat_tailwind::Tailwind;
-use orisu_compiler::compiler::{self as core_compiler, Options, SourceRoot, Stylesheet};
+use orisu_compat_tailwind::{OwnedCompiler, resolve};
+use orisu_compiler::compiler::{LoadStylesheet, SourceRoot, Stylesheet};
 use orisu_compiler::intellisense;
 use orisu_merge::Merger;
 use orisu_registry::utilities::UtilityKind;
+use orisu_theme::Inline;
 use std::path::PathBuf;
 use utf16::IndexConverter;
 
@@ -47,6 +47,18 @@ impl From<ChangedContent> for orisu_scanner::ChangedContent {
             (Some(file), _) => orisu_scanner::ChangedContent::File(file.into(), changed.extension),
             (None, content) => orisu_scanner::ChangedContent::Content(content.unwrap_or_default(), changed.extension),
         }
+    }
+}
+
+impl From<AttributifyOptions> for orisu_candidate::attributify::Attributify {
+    fn from(options: AttributifyOptions) -> Self {
+        Self { prefix: options.prefix, prefixed_only: options.prefixed_only }
+    }
+}
+
+impl From<&orisu_candidate::attributify::Attributify> for AttributifyOptions {
+    fn from(attributify: &orisu_candidate::attributify::Attributify) -> Self {
+        Self { prefix: attributify.prefix.clone(), prefixed_only: attributify.prefixed_only }
     }
 }
 
@@ -96,8 +108,8 @@ impl Scanner {
     pub fn new(opts: ScannerOptions) -> Self {
         let sources = opts.sources.unwrap_or_default().into_iter().map(Into::into).collect();
         let mut scanner = orisu_scanner::Scanner::new(sources);
-        if let Some(Either::A(AttributifyOptions { prefix, prefixed_only })) = opts.attributify {
-            scanner = scanner.with_attributify(orisu_scanner::attributify::Attributify { prefix, prefixed_only });
+        if let Some(Either::A(attributify)) = opts.attributify {
+            scanner = scanner.with_attributify(attributify.into());
         }
         if let Some(dir) = opts.cache {
             scanner = scanner.with_cache(dir);
@@ -123,14 +135,14 @@ impl Scanner {
 
     #[napi]
     pub fn get_candidates_with_positions(&mut self, input: ChangedContent) -> Result<Vec<CandidateWithPosition>> {
-        let content = match (input.content, input.file) {
-            (Some(content), _) => content,
-            (None, Some(file)) => std::fs::read_to_string(file).map_err(|e| Error::from_reason(e.to_string()))?,
-            (None, None) => String::new(),
+        let (content, extension) = match input.into() {
+            orisu_scanner::ChangedContent::File(file, extension) => {
+                (std::fs::read_to_string(file).map_err(|e| Error::from_reason(e.to_string()))?, extension)
+            }
+            orisu_scanner::ChangedContent::Content(content, extension) => (content, extension),
         };
         let mut utf16_idx = IndexConverter::new(&content);
-        let candidates =
-            self.scanner.get_candidates_with_positions(orisu_scanner::ChangedContent::Content(content.clone(), input.extension));
+        let candidates = self.scanner.get_candidates_with_positions(orisu_scanner::ChangedContent::Content(content.clone(), extension));
         Ok(candidates
             .into_iter()
             .map(|(candidate, position)| CandidateWithPosition { candidate, position: utf16_idx.get(position) })
@@ -179,19 +191,6 @@ pub struct CanonicalizeOptions {
 }
 
 #[napi(object)]
-pub struct CompilerSource {
-    pub base: String,
-    pub pattern: String,
-    pub negated: bool,
-}
-
-#[napi(object)]
-pub struct CompilerRoot {
-    pub base: String,
-    pub pattern: String,
-}
-
-#[napi(object)]
 pub struct ClassEntry {
     pub name: String,
     pub modifiers: Vec<String>,
@@ -221,36 +220,9 @@ pub struct MergeTable {
     pub names: Option<mangle::NameTable>,
 }
 
-struct State<'a> {
-    compiler: core_compiler::Compiler<'a>,
-    canonicalizer: Option<Canonicalizer<'a>>,
-}
-
-self_cell::self_cell!(
-    struct Arena {
-        owner: Allocator,
-        #[not_covariant]
-        dependent: State,
-    }
-);
-
-/// Owns the arena that the inner compiler borrows from.
 #[napi]
-pub struct Compiler {
-    arena: Arena,
-}
+pub struct Compiler(OwnedCompiler);
 
-impl Compiler {
-    fn with<R>(&self, f: impl for<'a> FnOnce(&core_compiler::Compiler<'a>) -> R) -> R {
-        self.arena.with_dependent(|_, state| f(&state.compiler))
-    }
-
-    fn with_mut<R>(&mut self, f: impl for<'a> FnOnce(&mut core_compiler::Compiler<'a>) -> R) -> R {
-        self.arena.with_dependent_mut(|_, state| f(&mut state.compiler))
-    }
-}
-
-/// Expands `hover:(a b)` variant groups inside the string literals of `code`; `null` when none were found.
 #[napi]
 pub fn expand_variant_groups(code: String) -> Option<String> {
     orisu_candidate::group::expand_in_strings(&code)
@@ -258,27 +230,28 @@ pub fn expand_variant_groups(code: String) -> Option<String> {
 
 type LoadFn<'f> = Function<'f, FnArgs<(String, String)>, LoadedStylesheet>;
 
-/// Throws errors whose `code` is a diagnostic code such as `INVALID_STYLESHEET`.
+/// Throws errors whose `code` is a diagnostic code such as `INVALID_STYLESHEET`, or `InvalidArg` for `polyfills` beyond 8 bits.
 #[napi]
 pub fn compile(css: String, options: Option<CompileOptions>, load_stylesheet: Option<LoadFn<'_>>) -> Result<Compiler, &'static str> {
     let options = options.unwrap_or(CompileOptions { base: None, polyfills: None });
-    let base = options.base.unwrap_or_default();
-    let mut opts = Options { base: &base, ..Options::default() };
-    if let Some(polyfills) = options.polyfills {
-        opts.polyfills = polyfills as u8;
-    }
-    if let Some(load) = load_stylesheet {
-        opts.load_stylesheet = Some(Box::new(move |id: &str, base: &str| {
+    let load = load_stylesheet.map(|load| -> Box<LoadStylesheet<'_>> {
+        Box::new(move |id: &str, base: &str| {
             load.call((id.to_owned(), base.to_owned()).into())
                 .map(|s| Stylesheet { path: s.path, base: s.base, content: s.content })
                 .map_err(|e| e.reason.clone())
-        }));
-    }
-    let arena = Arena::try_new(Allocator::new(), |alloc| {
-        core_compiler::compile(alloc.alloc_str(&css), alloc, Options { extension: Some(&Tailwind), ..opts })
-            .map(|compiler| State { compiler, canonicalizer: None })
+        })
     });
-    arena.map(|arena| Compiler { arena }).map_err(|error| Error::new(error.code.name(), error.message))
+    let polyfills =
+        options.polyfills.map(u8::try_from).transpose().map_err(|_| Error::new("InvalidArg", "`polyfills` must fit in 8 bits"))?;
+    OwnedCompiler::compile(&css, &options.base.unwrap_or_default(), polyfills, load)
+        .map(Compiler)
+        .map_err(|error| Error::new(error.code.name(), error.message))
+}
+
+/// The file an `@import` of `id` from the directory `base` loads, `null` when none.
+#[napi]
+pub fn resolve_css(id: String, base: String) -> Option<String> {
+    resolve::resolve_css(&id, base.as_ref()).map(|path| path.to_string_lossy().into_owned())
 }
 
 #[napi]
@@ -286,66 +259,59 @@ impl Compiler {
     /// The CSS for everything seen so far, `null` when it is unchanged since the previous call.
     #[napi]
     pub fn build_changed(&mut self, candidates: Vec<String>) -> Option<String> {
-        self.with_mut(|c| c.build_changed(candidates.iter().map(String::as_str)).map(str::to_owned))
+        self.0.with_mut(|c| c.build_changed(candidates.iter().map(String::as_str)).map(str::to_owned))
     }
 
     #[napi(getter)]
     pub fn features(&self) -> u32 {
-        self.with(|c| u32::from(c.features))
+        self.0.with(|c| u32::from(c.features))
     }
 
     /// The `@attributify` options, `null` without one.
     #[napi(getter)]
     pub fn attributify(&self) -> Option<AttributifyOptions> {
-        self.with(|c| {
-            c.design_system.attributify.map(|a| AttributifyOptions { prefix: a.prefix.to_owned(), prefixed_only: a.prefixed_only })
-        })
+        self.0.with(|c| c.design_system.attributify.as_ref().map(Into::into))
     }
 
     #[napi(getter)]
-    pub fn sources(&self) -> Vec<CompilerSource> {
-        self.with(|c| {
-            c.sources
-                .iter()
-                .map(|s| CompilerSource { base: s.base.to_owned(), pattern: s.pattern.to_owned(), negated: s.negated })
-                .collect()
+    pub fn sources(&self) -> Vec<SourceEntry> {
+        self.0.with(|c| {
+            c.sources.iter().map(|s| SourceEntry { base: s.base.to_owned(), pattern: s.pattern.to_owned(), negated: s.negated }).collect()
         })
     }
 
     /// `null` when no `source(…)` was given, the string `"none"` for `source(none)`.
-    #[napi(getter, ts_return_type = "null | 'none' | CompilerRoot")]
-    pub fn root(&self) -> napi::Either<Option<&'static str>, CompilerRoot> {
-        self.with(|c| match c.root {
+    #[napi(getter, ts_return_type = "null | 'none' | GlobEntry")]
+    pub fn root(&self) -> napi::Either<Option<&'static str>, GlobEntry> {
+        self.0.with(|c| match c.root {
             None => napi::Either::A(None),
             Some(SourceRoot::Disabled) => napi::Either::A(Some("none")),
-            Some(SourceRoot::Path { base, pattern }) => {
-                napi::Either::B(CompilerRoot { base: base.to_owned(), pattern: pattern.to_owned() })
-            }
+            Some(SourceRoot::Path { base, pattern }) => napi::Either::B(GlobEntry { base: base.to_owned(), pattern: pattern.to_owned() }),
         })
     }
 
     #[napi]
     pub fn candidates_to_css(&mut self, classes: Vec<String>) -> Vec<Option<String>> {
         let classes: Vec<&str> = classes.iter().map(String::as_str).collect();
-        self.with_mut(|c| c.session().candidates_to_css(&classes))
+        self.0.with_mut(|c| c.session().candidates_to_css(&classes))
     }
 
     #[napi]
     pub fn get_class_order(&mut self, classes: Vec<String>) -> Vec<Option<i64>> {
         let classes: Vec<&str> = classes.iter().map(String::as_str).collect();
-        self.with_mut(|c| c.session().class_order(&classes).into_iter().map(|(_, o)| o.map(|o| o as i64)).collect())
+        self.0.with_mut(|c| c.session().class_order(&classes).into_iter().map(|(_, o)| o.map(|o| o as i64)).collect())
     }
 
     #[napi]
     pub fn get_class_list(&self) -> Vec<ClassEntry> {
-        self.with(|c| {
+        self.0.with(|c| {
             intellisense::class_list(&c.design_system).into_iter().map(|c| ClassEntry { name: c.name, modifiers: c.modifiers }).collect()
         })
     }
 
     #[napi]
     pub fn get_variants(&self) -> Vec<VariantEntry> {
-        self.with(|c| {
+        self.0.with(|c| {
             intellisense::variants(&c.design_system)
                 .into_iter()
                 .map(|v| VariantEntry { name: v.name.to_owned(), is_arbitrary: v.is_arbitrary, values: v.values, has_dash: v.has_dash })
@@ -355,7 +321,7 @@ impl Compiler {
 
     #[napi]
     pub fn get_variant_selectors(&mut self, root: String, value: Option<String>, modifier: Option<String>) -> Vec<String> {
-        self.with_mut(|c| intellisense::variant_selectors(&mut c.session(), &root, value.as_deref(), modifier.as_deref()))
+        self.0.with_mut(|c| intellisense::variant_selectors(&mut c.session(), &root, value.as_deref(), modifier.as_deref()))
     }
 
     #[napi]
@@ -366,42 +332,40 @@ impl Compiler {
             collapse: o.collapse.unwrap_or(false),
             logical_to_physical: o.logical_to_physical.unwrap_or(false),
         });
-        self.arena.with_dependent_mut(|alloc, state| {
-            state.canonicalizer.get_or_insert_with(|| Canonicalizer::new(alloc)).canonicalize(
-                &state.compiler.design_system,
-                &candidates,
-                &options,
-            )
-        })
+        self.0.canonicalize(&candidates, &options)
     }
 
     /// Prints every parse of each candidate in canonical form.
     #[napi]
     pub fn print_candidates(&mut self, classes: Vec<String>) -> Vec<Vec<String>> {
-        self.with_mut(|c| {
+        self.0.with_mut(|c| {
             let mut ds = c.session();
-            classes.iter().map(|c| ds.parse_candidate(c).1.iter().map(|p| print_candidate(p, ds.theme.prefix())).collect()).collect()
+            let scratch = Allocator::new();
+            classes
+                .iter()
+                .map(|c| ds.parse_candidate(c).1.iter().map(|p| print_candidate(p, ds.theme.prefix(), &scratch)).collect())
+                .collect()
         })
     }
 
     #[napi(getter)]
     pub fn prefix(&self) -> Option<String> {
-        self.with(|c| c.design_system.theme.prefix().map(str::to_owned))
+        self.0.with(|c| c.design_system.theme.prefix().map(str::to_owned))
     }
 
     #[napi(getter)]
     pub fn important(&self) -> bool {
-        self.with(|c| c.design_system.important)
+        self.0.with(|c| c.design_system.important)
     }
 
     #[napi(getter)]
     pub fn invalid_candidates(&self) -> Vec<String> {
-        self.with(|c| c.design_system.invalid_candidates.iter().map(|c| (*c).to_owned()).collect())
+        self.0.with(|c| c.design_system.invalid_candidates.iter().map(|c| (*c).to_owned()).collect())
     }
 
     #[napi]
     pub fn theme_entries(&mut self) -> Vec<ThemeEntry> {
-        self.with_mut(|c| {
+        self.0.with_mut(|c| {
             let ds = c.session();
             ds.theme
                 .entries(ds.alloc)
@@ -412,12 +376,16 @@ impl Compiler {
 
     #[napi]
     pub fn resolve_theme_value(&mut self, path: String, force_inline: Option<bool>) -> Option<String> {
-        self.with_mut(|c| c.session().resolve_theme_value(&path, force_inline.unwrap_or(true)).map(str::to_owned))
+        self.0.with_mut(|c| {
+            c.session()
+                .resolve_theme_value(&path, if force_inline.unwrap_or(true) { Inline::Always } else { Inline::AsDeclared })
+                .map(str::to_owned)
+        })
     }
 
     #[napi]
     pub fn utility_names(&self) -> Vec<String> {
-        self.with(|c| {
+        self.0.with(|c| {
             let utilities = &c.design_system.utilities;
             let mut names: Vec<String> = utilities.keys(UtilityKind::Static).map(str::to_owned).collect();
             names.extend(utilities.keys(UtilityKind::Functional).map(str::to_owned));
@@ -427,38 +395,30 @@ impl Compiler {
 
     #[napi]
     pub fn variant_names(&self) -> Vec<String> {
-        self.with(|c| c.design_system.variants.keys().map(str::to_owned).collect())
+        self.0.with(|c| c.design_system.variants.keys().map(str::to_owned).collect())
     }
 
     #[napi]
     pub fn merge(&mut self, classes: Vec<String>) -> String {
-        self.with_mut(|c| Merger::new(c.session()).merge(classes.iter().map(String::as_str)))
+        self.0.with_mut(|c| Merger::new(c.session()).merge(classes.iter().map(String::as_str)))
     }
 
     #[napi]
     pub fn merge_table(&mut self, classes: Vec<String>) -> MergeTable {
-        self.with_mut(|c| {
-            let table = Merger::new(c.session()).table(classes.iter().map(String::as_str));
-            let (keys, values) = table.entries.into_iter().unzip();
-            MergeTable { prefix: c.design_system.theme.prefix().map(str::to_owned), keys, values, erases: table.erases, names: None }
+        self.0.with_mut(|c| {
+            let orisu_merge::MergeTable { keys, values, erases } = Merger::new(c.session()).table(classes.iter().map(String::as_str)).0;
+            MergeTable { prefix: c.design_system.theme.prefix().map(str::to_owned), keys, values, erases, names: None }
         })
     }
 }
 
-/// Lints `files` against the project of the CSS `entry`; one JSON diagnostic per line. With `fix`, rewrites the files with their fixes.
-#[napi]
-pub fn check(entry: String, files: Vec<String>, fix: Option<bool>) -> Result<String> {
+#[napi(ts_return_type = "Diagnostic[]")]
+pub fn check(env: &Env, entry: String, files: Vec<String>, fix: Option<bool>) -> Result<Unknown<'_>> {
     let files: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
     let diagnostics = orisu_lsp::check(entry.as_ref(), &files, fix.unwrap_or(false)).map_err(Error::from_reason)?;
-    let mut out = String::new();
-    for diagnostic in &diagnostics {
-        out.push_str(&serde_json::to_string(diagnostic).map_err(|e| Error::from_reason(e.to_string()))?);
-        out.push('\n');
-    }
-    Ok(out)
+    env.to_js_value(&diagnostics)
 }
 
-/// Serves the language server over this process's stdio until the client shuts it down.
 #[napi]
 pub fn lsp() -> Result<()> {
     orisu_lsp::run().map_err(Error::from_reason)

@@ -1,41 +1,35 @@
 use crate::cursor;
-use crate::extractor::pre_processors::pre_processor::PreProcessor;
 
-#[derive(Debug, Default)]
-pub struct Json;
+pub fn process(content: &[u8]) -> Vec<u8> {
+    let len = content.len();
+    let mut result = content.to_vec();
+    let mut cursor = cursor::Cursor::new(content);
 
-impl PreProcessor for Json {
-    fn process(&self, content: &[u8]) -> Vec<u8> {
-        let len = content.len();
-        let mut result = content.to_vec();
-        let mut cursor = cursor::Cursor::new(content);
+    while cursor.pos < len {
+        match cursor.curr() {
+            b'"' => {
+                cursor.advance();
 
-        while cursor.pos < len {
-            match cursor.curr() {
-                b'"' => {
-                    cursor.advance();
+                while cursor.pos < len {
+                    match cursor.curr() {
+                        b'\\' => cursor.advance_twice(),
 
-                    while cursor.pos < len {
-                        match cursor.curr() {
-                            b'\\' => cursor.advance_twice(),
+                        b'"' => break,
 
-                            b'"' => break,
-
-                            _ => cursor.advance(),
-                        };
-                    }
+                        _ => cursor.advance(),
+                    };
                 }
+            }
 
-                b'[' | b'{' | b']' | b'}' => {
-                    result[cursor.pos] = b' ';
-                }
+            b'[' | b'{' | b']' | b'}' => {
+                result[cursor.pos] = b' ';
+            }
 
-                _ => {}
-            };
+            _ => {}
+        };
 
-            cursor.advance();
-        }
-
-        result
+        cursor.advance();
     }
+
+    result
 }

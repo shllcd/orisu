@@ -2,8 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::bench::{counter, instructions};
-use crate::bench_tailwind::{bytes, duration, install, shadcn, si};
+use crate::harness::{bytes, counted, counter, duration, install, per_iteration, root, shadcn, si};
 
 const USAGE: &str = "usage: cargo xtask bench-lsp [--runs N] [scenario...]";
 
@@ -35,7 +34,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             _ => return Err(USAGE.to_owned()),
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace root");
+    let root = root();
     let work = root.join("target/bench-tailwind");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
     let modules = install(&work.join("deps"))?;
@@ -51,11 +50,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     let orisu = root.join("target/release/orisu-lsp");
     let tailwind = modules.join("@tailwindcss/language-server/bin/tailwindcss-language-server");
-    let peak: &[&str] = if cfg!(target_os = "macos") { &[] } else { &["/usr/bin/time", "-f", "%M kB maximum resident set size"] };
     let config = serde_json::json!({
         "root": project,
         "file": project.join(DOCUMENT),
-        "counter": ([peak, counter()].concat()),
+        "counter": counter(),
         "servers": { "orisu": [orisu], "tailwind": ["node", tailwind, "--stdio"] },
     });
     fs::write(work.join("lsp.json"), config.to_string()).map_err(|e| e.to_string())?;
@@ -96,44 +94,22 @@ pub fn run(args: &[String]) -> Result<(), String> {
 /// server's peak RSS, the minimum over `runs`.
 fn measure(script: &Path, work: &Path, engine: &str, scenario: &str, k: u64, runs: usize) -> Result<Sample, String> {
     let iterations = k.to_string();
-    let mut setup = 0;
-    let mut full = u64::MAX;
     let mut ms = f64::INFINITY;
     let mut rss = u64::MAX;
-    let modes: &[&str] = if k == 0 { &["1"] } else { &["0", "1"] };
-    for &mode in modes {
-        let mut best = u64::MAX;
-        for _ in 0..runs {
-            let output = Command::new("node")
-                .arg(script)
-                .arg(work)
-                .args([engine, scenario, &iterations, mode])
-                .output()
-                .map_err(|e| e.to_string())?;
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !output.status.success() {
-                return Err(format!("bench-lsp.mjs {engine} {scenario} failed:\n{stderr}"));
-            }
-            best = best.min(instructions(&stderr).ok_or_else(|| format!("no instruction count in:\n{stderr}"))?);
-            if mode == "1" {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                ms = ms.min(stdout.trim().parse().map_err(|_| format!("{engine} {scenario}: expected `ms`, got {stdout:?}"))?);
-                rss = rss.min(peak_rss(&stderr).ok_or_else(|| format!("no peak RSS in:\n{stderr}"))?);
-            }
+    let instructions = per_iteration(k, runs, |mode| {
+        let output =
+            Command::new("node").arg(script).arg(work).args([engine, scenario, &iterations, mode]).output().map_err(|e| e.to_string())?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            return Err(format!("bench-lsp.mjs {engine} {scenario} failed:\n{stderr}"));
         }
-        if mode == "0" {
-            setup = best;
-        } else {
-            full = best;
+        let counted = counted(&stderr)?;
+        if mode == "1" {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            ms = ms.min(stdout.trim().parse().map_err(|_| format!("{engine} {scenario}: expected `ms`, got {stdout:?}"))?);
+            rss = rss.min(counted.peak_rss);
         }
-    }
-    let per = k.max(1) as f64;
-    Ok(Sample { instructions: full.saturating_sub(setup) as f64 / per, ms: ms / per, rss })
-}
-
-/// Peak RSS in bytes from `time -l` on macOS or `time -f "%M kB …"` elsewhere.
-fn peak_rss(stderr: &str) -> Option<u64> {
-    let line = stderr.lines().find(|line| line.contains("maximum resident set size"))?;
-    let n: u64 = line.split_whitespace().next()?.parse().ok()?;
-    Some(if line.contains("kB") { n * 1024 } else { n })
+        Ok(counted.instructions)
+    })?;
+    Ok(Sample { instructions, ms: ms / k.max(1) as f64, rss })
 }

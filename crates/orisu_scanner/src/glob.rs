@@ -3,14 +3,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlobEntry {
-    /// Base path of the glob
     pub base: String,
-
-    /// Glob pattern
     pub pattern: String,
 }
 
-pub fn hoist_static_glob_parts(entries: &Vec<GlobEntry>, emit_parent_glob: bool) -> Vec<GlobEntry> {
+fn hoist_static_glob_parts(entries: &[GlobEntry]) -> Vec<GlobEntry> {
     let mut result = vec![];
 
     for entry in entries {
@@ -37,7 +34,7 @@ pub fn hoist_static_glob_parts(entries: &Vec<GlobEntry>, emit_parent_glob: bool)
             }
         };
 
-        if emit_parent_glob && pattern.is_empty() && base.is_file() {
+        if pattern.is_empty() && base.is_file() {
             result.push(GlobEntry {
                 // SAFETY: `parent()` will be available because we verify `base` is a file.
                 base: base.parent().unwrap().to_string_lossy().to_string(),
@@ -75,8 +72,8 @@ pub fn hoist_static_glob_parts(entries: &Vec<GlobEntry>, emit_parent_glob: bool)
 /// tailwind --pwd ./project/pages --content "**/*.js"
 /// tailwind --pwd ./project/components --content "**/*.js"
 /// ```
-pub fn optimize_patterns(entries: &Vec<GlobEntry>) -> Vec<GlobEntry> {
-    let entries = hoist_static_glob_parts(entries, true);
+pub fn optimize_patterns(entries: &[GlobEntry]) -> Vec<GlobEntry> {
+    let entries = hoist_static_glob_parts(entries);
 
     let mut pattern_map: FxHashMap<String, FxHashSet<String>> = FxHashMap::default();
 
@@ -114,7 +111,7 @@ pub fn optimize_patterns(entries: &Vec<GlobEntry>) -> Vec<GlobEntry> {
     glob_entries
 }
 
-pub fn split_pattern(pattern: &str) -> (Option<String>, Option<String>) {
+fn split_pattern(pattern: &str) -> (Option<String>, Option<String>) {
     if !pattern.contains('*') {
         return (Some(pattern.to_owned()), None);
     }

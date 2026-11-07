@@ -1,6 +1,5 @@
 use super::{NEG, PLAIN, POSITIONS, arbitrary_type};
 use crate::utilities::{Functional, Registrar, Suggest};
-use orisu_allocator::Vec;
 use orisu_ast::Node;
 use orisu_candidate::{CandidateKind, UtilityValue};
 use orisu_parser::infer::{DataType, is_positive_integer, js_number};
@@ -43,90 +42,49 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     r.static_decls("mix-blend-plus-lighter", &[("mix-blend-mode", "plus-lighter")]);
 
     r.static_decls("fill-none", &[("fill", "none")]);
-    r.functional_decl(
-        "fill",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                return None;
-            };
-            let value = match value? {
-                UtilityValue::Arbitrary { value, .. } => cx.as_color(value, modifier),
-                UtilityValue::Named { value, .. } => cx.resolve_theme_color(value, modifier, &["--fill", "--color"]),
-            };
-            cx.one("fill", value?)
-        },
-        |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            let value = match value? {
-                UtilityValue::Arbitrary { value, .. } => cx.as_color(value, None),
-                UtilityValue::Named { value, .. } => cx.resolve_theme_color(value, None, &["--fill", "--color"]),
-            };
-            Some(Vec::from_iter_in([("fill", value?)], cx.alloc))
-        },
-    );
+    r.functional_fn("fill", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        let value = match value? {
+            UtilityValue::Arbitrary { value, .. } => cx.as_color(value, modifier),
+            UtilityValue::Named { value, .. } => cx.resolve_theme_color(value, modifier, &["--fill", "--color"]),
+        };
+        cx.one("fill", value?)
+    });
     r.suggest("fill", vec![Suggest::color(&["--fill", "--color"])]);
 
     r.static_decls("stroke-none", &[("stroke", "none")]);
-    r.functional_decl(
-        "stroke",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    match arbitrary_type(data_type, value, &[DataType::Color, DataType::Number, DataType::Length, DataType::Percentage]) {
-                        Some("number" | "length" | "percentage") => {
-                            if modifier.is_some() {
-                                return None;
-                            }
-                            cx.one("stroke-width", value)
+    r.functional_fn("stroke", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        match value? {
+            UtilityValue::Arbitrary { data_type, value } => {
+                match arbitrary_type(data_type, value, &[DataType::Color, DataType::Number, DataType::Length, DataType::Percentage]) {
+                    Some("number" | "length" | "percentage") => {
+                        if modifier.is_some() {
+                            return None;
                         }
-                        _ => cx.one("stroke", cx.as_color(value, modifier)?),
+                        cx.one("stroke-width", value)
                     }
-                }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(v) = cx.resolve_theme_color(value, modifier, &["--stroke", "--color"]) {
-                        return cx.one("stroke", v);
-                    }
-                    if modifier.is_some() {
-                        return None;
-                    }
-                    if let Some(v) = cx.resolve(Some(value), &["--stroke-width"]).filter(|v| !v.is_empty()) {
-                        return cx.one("stroke-width", v);
-                    }
-                    is_positive_integer(value).then(|| cx.one("stroke-width", value))?
+                    _ => cx.one("stroke", cx.as_color(value, modifier)?),
                 }
             }
-        },
-        |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    match arbitrary_type(data_type, value, &[DataType::Color, DataType::Number, DataType::Length, DataType::Percentage]) {
-                        Some("number" | "length" | "percentage") => Some(Vec::from_iter_in([("stroke-width", value)], cx.alloc)),
-                        _ => {
-                            let color = cx.as_color(value, None)?;
-                            Some(Vec::from_iter_in([("stroke", color)], cx.alloc))
-                        }
-                    }
+            UtilityValue::Named { value, .. } => {
+                if let Some(v) = cx.resolve_theme_color(value, modifier, &["--stroke", "--color"]) {
+                    return cx.one("stroke", v);
                 }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(color) = cx.resolve_theme_color(value, None, &["--stroke", "--color"]) {
-                        return Some(Vec::from_iter_in([("stroke", color)], cx.alloc));
-                    }
-                    if let Some(v) = cx.resolve(Some(value), &["--stroke-width"]).filter(|v| !v.is_empty()) {
-                        return Some(Vec::from_iter_in([("stroke-width", v)], cx.alloc));
-                    }
-                    is_positive_integer(value).then(|| Vec::from_iter_in([("stroke-width", value)], cx.alloc))
+                if modifier.is_some() {
+                    return None;
                 }
+                if let Some(v) = cx.resolve(Some(value), &["--stroke-width"]).filter(|v| !v.is_empty()) {
+                    return cx.one("stroke-width", v);
+                }
+                is_positive_integer(value).then(|| cx.one("stroke-width", value))?
             }
-        },
-    );
+        }
+    });
     r.suggest("stroke", vec![Suggest::color(&["--stroke", "--color"]), Suggest::values(&["0", "1", "2", "3"]).keys(&["--stroke-width"])]);
 
     for value in ["contain", "cover", "fill", "none", "scale-down"] {
@@ -182,7 +140,7 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
             }
             UtilityValue::Named { value, .. } => {
                 if let Some((families, options)) =
-                    cx.theme.resolve_with(value, &["--font"], &["--font-feature-settings", "--font-variation-settings"], cx.options)
+                    cx.theme.resolve_with(value, &["--font"], &["--font-feature-settings", "--font-variation-settings"], cx.inline)
                 {
                     let option = |key| options.iter().find(|(name, _)| *name == key).map(|&(_, v)| v);
                     return Some(cx.nodes([
@@ -242,67 +200,37 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     }
     r.static_decls("decoration-auto", &[("text-decoration-thickness", "auto")]);
     r.static_decls("decoration-from-font", &[("text-decoration-thickness", "from-font")]);
-    r.functional_decl(
-        "decoration",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    match arbitrary_type(data_type, value, &[DataType::Color, DataType::Length, DataType::Percentage]) {
-                        Some("length" | "percentage") => {
-                            if modifier.is_some() {
-                                return None;
-                            }
-                            cx.one("text-decoration-thickness", value)
-                        }
-                        _ => cx.one("text-decoration-color", cx.as_color(value, modifier)?),
-                    }
-                }
-                UtilityValue::Named { value, .. } => {
-                    let thickness = cx
-                        .resolve(Some(value), &["--text-decoration-thickness"])
-                        .filter(|v| !v.is_empty())
-                        .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])));
-                    if let Some(thickness) = thickness {
+    r.functional_fn("decoration", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        match value? {
+            UtilityValue::Arbitrary { data_type, value } => {
+                match arbitrary_type(data_type, value, &[DataType::Color, DataType::Length, DataType::Percentage]) {
+                    Some("length" | "percentage") => {
                         if modifier.is_some() {
                             return None;
                         }
-                        return cx.one("text-decoration-thickness", thickness);
+                        cx.one("text-decoration-thickness", value)
                     }
-                    cx.one("text-decoration-color", cx.resolve_theme_color(value, modifier, &["--text-decoration-color", "--color"])?)
+                    _ => cx.one("text-decoration-color", cx.as_color(value, modifier)?),
                 }
             }
-        },
-        |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    match arbitrary_type(data_type, value, &[DataType::Color, DataType::Length, DataType::Percentage]) {
-                        Some("length" | "percentage") => Some(Vec::from_iter_in([("text-decoration-thickness", value)], cx.alloc)),
-                        _ => {
-                            let color = cx.as_color(value, None)?;
-                            Some(Vec::from_iter_in([("text-decoration-color", color)], cx.alloc))
-                        }
+            UtilityValue::Named { value, .. } => {
+                let thickness = cx
+                    .resolve(Some(value), &["--text-decoration-thickness"])
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])));
+                if let Some(thickness) = thickness {
+                    if modifier.is_some() {
+                        return None;
                     }
+                    return cx.one("text-decoration-thickness", thickness);
                 }
-                UtilityValue::Named { value, .. } => {
-                    let thickness = cx
-                        .resolve(Some(value), &["--text-decoration-thickness"])
-                        .filter(|v| !v.is_empty())
-                        .or_else(|| is_positive_integer(value).then(|| cx.cat(&[value, "px"])));
-                    if let Some(thickness) = thickness {
-                        return Some(Vec::from_iter_in([("text-decoration-thickness", thickness)], cx.alloc));
-                    }
-                    let color = cx.resolve_theme_color(value, None, &["--text-decoration-color", "--color"])?;
-                    Some(Vec::from_iter_in([("text-decoration-color", color)], cx.alloc))
-                }
+                cx.one("text-decoration-color", cx.resolve_theme_color(value, modifier, &["--text-decoration-color", "--color"])?)
             }
-        },
-    );
+        }
+    });
     r.suggest(
         "decoration",
         vec![

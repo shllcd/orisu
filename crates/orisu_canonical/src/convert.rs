@@ -5,7 +5,6 @@ use super::Canon;
 use orisu_allocator::{AllocExt, Vec};
 use orisu_candidate::Modifier;
 use orisu_parser::infer::{format_js_number, is_multiple_of_quarter, js_number};
-use orisu_parser::misc::to_key_path;
 use orisu_parser::segment::segment;
 use orisu_parser::value::{self as vp, ValueNode};
 
@@ -60,7 +59,7 @@ fn kebab(part: &str) -> String {
 }
 
 /// `["fontSize", "xs", "1", "lineHeight"]` → `text-xs--line-height`, or `None` when the path has no CSS variable.
-pub(super) fn key_path_to_css_property(path: &[String]) -> Option<String> {
+pub fn key_path_to_css_property(path: &[String]) -> Option<String> {
     let first = path.first()?;
     if let Some(special) = lookup(SPECIAL_DEFAULT_KEYS, first)
         && path.get(1).is_some_and(|p| p == "DEFAULT")
@@ -309,4 +308,30 @@ fn count_theme_usages(nodes: &[ValueNode<'_>], usages: &mut usize, modifiers: &m
         }
         count_theme_usages(children, usages, modifiers);
     }
+}
+
+/// `a.b[c.d]` → `["a", "b", "c.d"]`.
+pub fn to_key_path(path: &str) -> std::vec::Vec<String> {
+    let mut keypath = std::vec::Vec::new();
+    for part in segment(path, b'.') {
+        if !part.contains('[') {
+            keypath.push(part.to_owned());
+            continue;
+        }
+        let mut current = 0;
+        while let Some(l) = part[current..].find('[').map(|i| i + current) {
+            let Some(r) = part[l..].find(']').map(|i| i + l) else {
+                break;
+            };
+            if l > current {
+                keypath.push(part[current..l].to_owned());
+            }
+            keypath.push(part[l + 1..r].to_owned());
+            current = r + 1;
+        }
+        if current < part.len() {
+            keypath.push(part[current..].to_owned());
+        }
+    }
+    keypath
 }

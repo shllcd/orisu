@@ -1,8 +1,10 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use orisu_allocator::{AllocExt, Allocator, ArenaString, Vec};
-use orisu_ast::bytes::ByteTable;
+use orisu_allocator::{Allocator, ArenaString, Vec};
+use orisu_ast::bytes::{ByteTable, normalize_newlines, string_end};
+use smallvec::SmallVec;
+use std::fmt::Write;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValueNode<'a> {
@@ -39,44 +41,31 @@ pub fn to_string(ast: &[ValueNode<'_>]) -> String {
     out
 }
 
-pub trait Sink {
-    fn put(&mut self, s: &str);
-}
-
-impl Sink for String {
-    #[inline]
-    fn put(&mut self, s: &str) {
-        self.push_str(s);
-    }
-}
-
-impl Sink for ArenaString<'_> {
-    #[inline]
-    fn put(&mut self, s: &str) {
-        self.push_str(s);
-    }
-}
-
-pub fn write_css(ast: &[ValueNode<'_>], out: &mut impl Sink) {
+pub fn write_css(ast: &[ValueNode<'_>], out: &mut impl Write) {
     for node in ast {
         match node {
-            ValueNode::Word(v) | ValueNode::Separator(v) => out.put(v),
+            ValueNode::Word(v) | ValueNode::Separator(v) => put(out, v),
             ValueNode::Function(name, nodes) => {
-                out.put(name);
-                out.put("(");
+                put(out, name);
+                put(out, "(");
                 write_css(nodes, out);
-                out.put(")");
+                put(out, ")");
             }
         }
     }
+}
+
+/// Writes to a `String` or `ArenaString`, which cannot fail.
+#[inline]
+pub(crate) fn put(out: &mut impl Write, s: &str) {
+    let _ = out.write_str(s);
 }
 
 static SEPARATOR: ByteTable = ByteTable::new(b":,=><\n \t");
 static SPECIAL: ByteTable = ByteTable::new(b"\\/:,=><\n \t'\"()");
 
 pub fn parse<'a>(input: &str, alloc: &'a Allocator) -> Vec<'a, ValueNode<'a>> {
-    let input: &'a str = if input.contains("\r\n") { alloc.str(&input.replace("\r\n", "\n")) } else { alloc.str(input) };
-    parse_in(input, alloc)
+    parse_in(normalize_newlines(input, alloc), alloc)
 }
 
 pub fn parse_in<'a>(input: &'a str, alloc: &'a Allocator) -> Vec<'a, ValueNode<'a>> {
@@ -117,22 +106,7 @@ pub fn parse_in<'a>(input: &'a str, alloc: &'a Allocator) -> Vec<'a, ValueNode<'
                 i += 1;
                 start = i;
             }
-            b'\'' | b'"' => {
-                let quote = bytes[i];
-                let mut j = i + 1;
-                let mut close = None;
-                while j < len {
-                    match bytes[j] {
-                        b'\\' => j += 2,
-                        b if b == quote => {
-                            close = Some(j);
-                            break;
-                        }
-                        _ => j += 1,
-                    }
-                }
-                i = close.map_or(i + 1, |c| c + 1);
-            }
+            b'\'' | b'"' => i = string_end(bytes, i).map_or(i + 1, |c| c + 1),
             b'(' => {
                 stack.push((&input[start..i], Vec::new_in(alloc)));
                 i += 1;
@@ -165,4 +139,34 @@ pub fn parse_in<'a>(input: &'a str, alloc: &'a Allocator) -> Vec<'a, ValueNode<'
         ast.push(ValueNode::Word(word));
     }
     ast
+}
+
+pub fn extract_used_variables<'a>(raw: &'a str, alloc: &'a Allocator) -> SmallVec<[&'a str; 4]> {
+    let mut out = SmallVec::new();
+    if !raw.contains("var(") {
+        return out;
+    }
+    let ast = parse_in(raw, alloc);
+    fn collect_words<'a>(nodes: &[ValueNode<'a>], out: &mut SmallVec<[&'a str; 4]>) {
+        for node in nodes {
+            match node {
+                ValueNode::Word(w) if w.starts_with("--") => out.push(w),
+                ValueNode::Function(_, children) => collect_words(children, out),
+                _ => {}
+            }
+        }
+    }
+    fn find_vars<'a>(nodes: &[ValueNode<'a>], out: &mut SmallVec<[&'a str; 4]>) {
+        for node in nodes {
+            if let ValueNode::Function(name, children) = node {
+                if *name == "var" {
+                    collect_words(children, out);
+                } else {
+                    find_vars(children, out);
+                }
+            }
+        }
+    }
+    find_vars(&ast, &mut out);
+    out
 }

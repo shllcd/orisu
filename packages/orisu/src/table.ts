@@ -1,7 +1,7 @@
 import type { MergeTableSource, NameTableSource } from "./merge.ts";
 import type { MergeTable, NameTable } from "./native.ts";
 
-// One printable ASCII char holds the shared prefix length; a longer one is cut here and only costs bytes.
+/** One printable ASCII char holds the shared prefix length; a longer one is cut here and only costs bytes. */
 const MAX_SHARED = 94;
 
 const sharedPrefix = (a: string, b: string): number => {

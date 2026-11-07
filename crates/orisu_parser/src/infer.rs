@@ -3,6 +3,7 @@
 
 use crate::math::has_math_fn;
 use crate::segment::segment;
+use orisu_ast::bytes::CSS_WS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DataType {
@@ -273,8 +274,20 @@ const NAMED_COLORS: &[&str] = &[
     "accentcolortext",
 ];
 
+const LONGEST_NAMED_COLOR: usize = {
+    let mut max = 0;
+    let mut i = 0;
+    while i < NAMED_COLORS.len() {
+        if NAMED_COLORS[i].len() > max {
+            max = NAMED_COLORS[i].len();
+        }
+        i += 1;
+    }
+    max
+};
+
 pub fn is_named_color(value: &str) -> bool {
-    value.len() <= 20 && NAMED_COLORS.iter().any(|c| c.eq_ignore_ascii_case(value))
+    value.len() <= LONGEST_NAMED_COLOR && NAMED_COLORS.iter().any(|c| c.eq_ignore_ascii_case(value))
 }
 
 const COLOR_FNS: &[&str] =
@@ -358,7 +371,8 @@ fn is_absolute_size(value: &str) -> bool {
     matches!(value, "xx-small" | "x-small" | "small" | "medium" | "large" | "x-large" | "xx-large" | "xxx-large")
 }
 
-pub fn match_number(s: &[u8]) -> Option<usize> {
+/// Length of the number without exponent at the start of `s`: a sign, then `1`, `1.5` or `.5`.
+pub(crate) fn match_mantissa(s: &[u8]) -> Option<usize> {
     let mut i = 0;
     if matches!(s.first(), Some(b'+' | b'-')) {
         i += 1;
@@ -376,6 +390,12 @@ pub fn match_number(s: &[u8]) -> Option<usize> {
     } else if int_len == 0 {
         return None;
     }
+    Some(i)
+}
+
+/// Length of the CSS `<number>` at the start of `s`.
+fn match_number(s: &[u8]) -> Option<usize> {
+    let mut i = match_mantissa(s)?;
     if matches!(s.get(i), Some(b'e' | b'E')) {
         let mut j = i + 1;
         if matches!(s.get(j), Some(b'+' | b'-')) {
@@ -399,7 +419,7 @@ fn is_number_then(value: &str, units: &[&str]) -> bool {
     }
 }
 
-pub fn is_plain_number(value: &str) -> bool {
+fn is_plain_number(value: &str) -> bool {
     match_number(value.as_bytes()) == Some(value.len())
 }
 
@@ -411,22 +431,15 @@ fn is_percentage(value: &str) -> bool {
     is_number_then(value, &["%"]) || has_math_fn(value)
 }
 
-fn skip_ws(s: &[u8], mut i: usize) -> usize {
-    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0c) {
-        i += 1;
-    }
-    i
-}
-
 fn is_fraction(value: &str) -> bool {
     let s = value.as_bytes();
     let check = || {
         let a = match_number(s)?;
-        let i = skip_ws(s, a);
+        let i = CSS_WS.skip(s, a);
         if s.get(i) != Some(&b'/') {
             return None;
         }
-        let i = skip_ws(s, i + 1);
+        let i = CSS_WS.skip(s, i + 1);
         let b = match_number(&s[i..])?;
         (i + b == s.len()).then_some(())
     };

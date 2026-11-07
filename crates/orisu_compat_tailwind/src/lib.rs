@@ -2,6 +2,8 @@
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
 mod legacy;
+mod owned;
+pub mod resolve;
 pub mod stylesheets;
 mod theme_fn;
 
@@ -11,15 +13,16 @@ use orisu_compiler::extension::Extension;
 use orisu_registry::utilities::{Registrar, Utilities};
 use orisu_theme::Theme;
 
-pub const VERSION: &str = "4.3.4";
-pub const BANNER: &str = "! tailwindcss v4.3.4 | MIT License | https://tailwindcss.com ";
+pub use owned::OwnedCompiler;
+
+const BANNER: &str = "! tailwindcss v4.3.4 | MIT License | https://tailwindcss.com ";
 
 /// Tailwind CSS 4.3.4 on top of the orisu compiler.
 pub struct Tailwind;
 
 impl<'a> Extension<'a> for Tailwind {
-    fn banner(&self) -> Option<&'a str> {
-        Some(BANNER)
+    fn banner(&self) -> &'a str {
+        BANNER
     }
 
     fn stylesheet(&self, uri: &str) -> Option<&'static str> {

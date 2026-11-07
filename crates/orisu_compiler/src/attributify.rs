@@ -1,75 +1,38 @@
-//! UnoCSS-style attributify: `<div bg="red-500 hover:blue-500" p-4>` styled through attribute
-//! selectors. The scanner hands attributes over as `[name~="value"]` and `[name=""]` candidates.
+//! Compiles the attributify candidates of `orisu_candidate::attributify` to rules on attribute selectors.
 
 use orisu_allocator::{AllocExt, Allocator};
 use orisu_ast::Node;
+use orisu_candidate::attributify::{Attributify, decode, encode};
 use orisu_parser::escape::escape;
 use orisu_parser::segment::segment;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Attributify<'a> {
-    pub prefix: &'a str,
-    pub prefixed_only: bool,
-}
-
-impl<'a> Attributify<'a> {
-    /// Parses the params of `@attributify`: `prefix(<name>)` and `prefixed-only`, in any order.
-    pub fn parse(params: &'a str) -> Result<Self, String> {
-        let mut out = Self { prefix: "un-", prefixed_only: false };
-        for param in params.split_ascii_whitespace() {
-            if let Some(prefix) = param.strip_prefix("prefix(").and_then(|p| p.strip_suffix(')')) {
-                out.prefix = prefix.trim_matches(['"', '\'']);
-            } else if param == "prefixed-only" {
-                out.prefixed_only = true;
+/// The utility an attribute candidate stands for, and the selector matching the attribute:
+/// `[hover:text~="red-500"]` is `hover:text-red-500` on `[hover\:text~="red-500"]`.
+pub(crate) fn resolve(attributify: &Attributify, raw: &str) -> Option<(String, String)> {
+    let (name, value) = decode(raw)?;
+    let bare = match name.strip_prefix(attributify.prefix.as_str()) {
+        Some(bare) if !attributify.prefix.is_empty() => bare,
+        _ if attributify.prefixed_only => return None,
+        _ => name,
+    };
+    let utility = match value {
+        None => bare.to_owned(),
+        Some(value) => {
+            let (name_variants, root) = split_variants(bare);
+            let (value_variants, value) = split_variants(value);
+            let (important, value) = match value.strip_prefix('!') {
+                Some(value) => ("!", value),
+                None => ("", value),
+            };
+            if value == "~" {
+                format!("{name_variants}{value_variants}{important}{root}")
             } else {
-                return Err(format!("Unknown `@attributify` option `{param}`."));
+                format!("{name_variants}{value_variants}{important}{root}-{value}")
             }
         }
-        Ok(out)
-    }
-
-    /// The utility an attribute candidate stands for, and the selector matching the attribute:
-    /// `[hover:text~="red-500"]` is `hover:text-red-500` on `[hover\:text~="red-500"]`.
-    pub fn resolve(&self, raw: &str) -> Option<(String, String)> {
-        let inner = raw.strip_prefix('[')?.strip_suffix(']')?;
-        let (name, value) = match inner.strip_suffix("=\"\"") {
-            Some(name) => (name, None),
-            None => {
-                let (name, value) = inner.split_once("~=\"")?;
-                (name, Some(value.strip_suffix('"')?))
-            }
-        };
-        if name.is_empty() || name.contains(['"', '=', '~']) || value.is_some_and(|v| v.is_empty() || v.contains('"')) {
-            return None;
-        }
-        let bare = match name.strip_prefix(self.prefix) {
-            Some(bare) if !self.prefix.is_empty() => bare,
-            _ if self.prefixed_only => return None,
-            _ => name,
-        };
-        let utility = match value {
-            None => bare.to_owned(),
-            Some(value) => {
-                let (name_variants, root) = split_variants(bare);
-                let (value_variants, value) = split_variants(value);
-                let (important, value) = match value.strip_prefix('!') {
-                    Some(value) => ("!", value),
-                    None => ("", value),
-                };
-                if value == "~" {
-                    format!("{name_variants}{value_variants}{important}{root}")
-                } else {
-                    format!("{name_variants}{value_variants}{important}{root}-{value}")
-                }
-            }
-        };
-        let name = escape(name);
-        let selector = match value {
-            None => format!("[{name}=\"\"]"),
-            Some(value) => format!("[{name}~=\"{value}\"]"),
-        };
-        Some((utility, selector))
-    }
+    };
+    let selector = encode(&escape(name), value);
+    Some((utility, selector))
 }
 
 /// Splits `hover:focus:bg` into `hover:focus:` and `bg`.

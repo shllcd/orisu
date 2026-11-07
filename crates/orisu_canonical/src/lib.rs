@@ -7,19 +7,21 @@ mod signature;
 mod utility;
 mod variant;
 
+pub use convert::{key_path_to_css_property, to_key_path};
+
 use fold::{constant_fold_declaration, locale_compare};
 use indexmap::{IndexMap, IndexSet};
 use orisu_allocator::{AllocExt, Allocator, Vec};
 use orisu_ast::{Node, Nodes};
-use orisu_candidate::print::{print_candidate_with, print_variant};
-use orisu_candidate::{Candidate, CandidateKind, Variant, VariantKind};
-use orisu_compiler::compile::flags;
+use orisu_candidate::print::{print_candidate, print_modifier, print_variant};
+use orisu_candidate::{Candidate, CandidateKind, Modifier, Variant, VariantKind};
 use orisu_compiler::design_system::{Caches, DesignSystem, Session};
 use orisu_compiler::intellisense::{class_list_keeping, class_list_unsorted};
 use orisu_parser::compare::dimension;
 use orisu_parser::infer::{format_js_number, is_multiple_of_quarter};
 use orisu_parser::segment::segment;
 use orisu_registry::utilities::UtilityKind;
+use orisu_theme::Inline;
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::borrow::Cow;
@@ -47,7 +49,6 @@ pub(crate) struct SigOpts {
 }
 
 type SigKey = (Option<u64>, u8);
-type CanonKey = (SigKey, bool);
 type Set<T> = IndexSet<T, FxBuildHasher>;
 type Map<K, V> = IndexMap<K, V, FxBuildHasher>;
 type PropertyValues = Map<String, Set<String>>;
@@ -80,7 +81,7 @@ struct UtilityKey<'a> {
 #[derive(PartialEq, Eq, Hash)]
 struct ValueKey<'a> {
     sig: SigKey,
-    inline: bool,
+    inline: Inline,
     value: &'a str,
 }
 
@@ -103,7 +104,7 @@ struct Storage<'a> {
     spacing: FxHashMap<SpacingKey, Option<f64>>,
     normalized_values: FxHashMap<ValueKey<'a>, (String, Box<str>)>,
     theme_variables: FxHashMap<(SigKey, String), Option<ThemeVariables>>,
-    candidates: FxHashMap<(CanonKey, &'a str), &'a str>,
+    candidates: FxHashMap<(SigKey, &'a str), &'a str>,
     variants: FxHashMap<Variant<'a>, &'a [&'a Variant<'a>]>,
     scratch: Allocator,
     print_scratch: Allocator,
@@ -113,39 +114,53 @@ pub(crate) struct Canon<'a, 'd> {
     pub ds: Session<'d, 'a>,
     storage: &'d mut Storage<'a>,
     pub sig: SigOpts,
-    collapse: bool,
 }
 
-/// Canonicalizes candidates against one design system, caching per option set so results never depend on call order.
+/// Canonicalizes candidates, caching per design system and option set so results never depend on call order.
 pub struct Canonicalizer<'a> {
     alloc: &'a Allocator,
+    /// The [`DesignSystem::id`] the caches belong to.
+    ds: Option<u64>,
     caches: Caches<'a>,
     storage: Storage<'a>,
 }
 
 impl<'a> Canonicalizer<'a> {
     pub fn new(alloc: &'a Allocator) -> Self {
-        Self { alloc, caches: Caches::default(), storage: Storage::default() }
+        Self { alloc, ds: None, caches: Caches::default(), storage: Storage::default() }
     }
 
-    /// `ds` must be the design system of every earlier call, as results are cached across calls.
     pub fn canonicalize(&mut self, ds: &DesignSystem<'a>, candidates: &[&str], options: &CanonicalizeOptions) -> std::vec::Vec<String> {
-        let mut features = 0;
-        if options.collapse {
-            features |= features::EXPAND_PROPERTIES;
+        if self.ds != Some(ds.id()) {
+            self.ds = Some(ds.id());
+            self.caches = Caches::default();
+            self.storage = Storage::default();
         }
-        if options.logical_to_physical {
-            features |= features::LOGICAL_TO_PHYSICAL;
-        }
+        let features = if options.collapse {
+            features::EXPAND_PROPERTIES | if options.logical_to_physical { features::LOGICAL_TO_PHYSICAL } else { 0 }
+        } else {
+            0
+        };
         let sig = SigOpts { rem: options.rem, features };
-        let mut cx =
-            Canon { ds: Session::new(ds, self.alloc, &mut self.caches), storage: &mut self.storage, sig, collapse: options.collapse };
+        let mut cx = Canon { ds: Session::new(ds, self.alloc, &mut self.caches), storage: &mut self.storage, sig };
         let result: Set<&str> = candidates.iter().map(|c| cx.canonicalize_candidate(c)).collect();
         if result.len() <= 1 || !options.collapse {
             return result.into_iter().map(str::to_owned).collect();
         }
         cx.collapse_candidates(result.into_iter().map(str::to_owned).collect())
     }
+}
+
+/// Runs `f` on a canonicalizer of its own arena and caches, for a worker thread.
+fn with_worker<'a, R>(ds: &DesignSystem<'a>, inline: Inline, sig: SigOpts, f: impl for<'w> FnOnce(&mut Canon<'w, '_>) -> R) -> R {
+    let alloc = Allocator::default();
+    let mut caches = Caches::default();
+    let mut storage = Storage::default();
+    // SAFETY: `DesignSystem` has no interior mutability and is only read through `&`, so nothing allocated in the
+    // shorter-lived worker arena can be stored into it; this only narrows the lifetime as covariance would.
+    let ds = unsafe { std::mem::transmute::<&DesignSystem<'a>, &DesignSystem<'_>>(ds) };
+    let mut session = Session::new(ds, &alloc, &mut caches);
+    f(&mut Canon { ds: session.with_inline(inline), storage: &mut storage, sig })
 }
 
 const MAX_BARE_VALUE_IN_PX: f64 = 1536.0;
@@ -182,25 +197,30 @@ impl<'a, 'd> Canon<'a, 'd> {
         (self.sig.rem.map(f64::to_bits), self.sig.features)
     }
 
-    fn canon_key(&self) -> CanonKey {
-        (self.sig_key(), self.collapse)
-    }
-
     pub(crate) fn prefix(&self) -> Option<&'a str> {
         self.ds.theme.prefix().filter(|p| !p.is_empty())
     }
 
-    pub(crate) fn without_inline<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let previous = self.ds.options;
-        self.ds.options |= orisu_theme::opts::IGNORE_INLINE;
-        let result = f(self);
-        self.ds.options = previous;
-        result
+    pub(crate) fn without_inline<T>(&mut self, f: impl FnOnce(&mut Canon<'a, '_>) -> T) -> T {
+        f(&mut Canon { ds: self.ds.with_inline(Inline::Never), storage: &mut *self.storage, sig: self.sig })
     }
 
     pub(crate) fn print(&mut self, candidate: &Candidate<'_>) -> String {
+        let prefix = self.ds.theme.prefix();
+        self.with_print_scratch(|alloc| print_candidate(candidate, prefix, alloc))
+    }
+
+    pub(crate) fn print_variant(&mut self, variant: &Variant<'_>) -> String {
+        self.with_print_scratch(|alloc| print_variant(variant, alloc))
+    }
+
+    pub(crate) fn print_modifier(&mut self, modifier: Modifier<'_>) -> String {
+        self.with_print_scratch(|alloc| print_modifier(modifier, alloc))
+    }
+
+    fn with_print_scratch(&mut self, f: impl FnOnce(&Allocator) -> String) -> String {
         let mut scratch = std::mem::take(&mut self.storage.print_scratch);
-        let printed = print_candidate_with(candidate, self.ds.theme.prefix(), &scratch);
+        let printed = f(&scratch);
         scratch.reset();
         self.storage.print_scratch = scratch;
         printed
@@ -274,26 +294,19 @@ impl<'a, 'd> Canon<'a, 'd> {
     /// Records the properties of every functional root reachable only through an arbitrary value of each data type.
     fn prefill_root_properties(&mut self, key: SigKey) {
         let roots: std::vec::Vec<&'a str> = self.ds.ds.utilities.keys(UtilityKind::Functional).collect();
-        let (ds, options, sig, collapse) = (self.ds.ds, self.ds.options, self.sig, self.collapse);
+        let (ds, inline, sig) = (self.ds.ds, self.ds.inline(), self.sig);
         let results: std::vec::Vec<std::vec::Vec<Option<std::vec::Vec<String>>>> = roots
             .par_chunks(32)
             .map(|chunk| {
-                let alloc = Allocator::default();
-                let mut caches = Caches::default();
-                let mut storage = Storage::default();
-                // SAFETY: `DesignSystem` has no interior mutability and is only read through `&`, so nothing allocated in the
-                // shorter-lived worker arena can be stored into it; this only narrows the lifetime as covariance would.
-                let ds = unsafe { std::mem::transmute::<&DesignSystem<'a>, &DesignSystem<'_>>(ds) };
-                let mut session = Session::new(ds, &alloc, &mut caches);
-                session.options = options;
-                let mut cx = Canon { ds: session, storage: &mut storage, sig, collapse };
-                let mut properties = std::vec::Vec::new();
-                for root in chunk {
-                    for value in ROOT_VALUE_PROBES {
-                        properties.push(cx.compute_utility_properties(&format!("{root}-[{value}]")));
+                with_worker(ds, inline, sig, |cx| {
+                    let mut properties = std::vec::Vec::new();
+                    for root in chunk {
+                        for value in ROOT_VALUE_PROBES {
+                            properties.push(cx.compute_utility_properties(&format!("{root}-[{value}]")));
+                        }
                     }
-                }
-                properties
+                    properties
+                })
             })
             .collect();
         let index = self.storage.property_roots.entry(key).or_default();
@@ -342,7 +355,7 @@ impl<'a, 'd> Canon<'a, 'd> {
     }
 
     fn spacing_multiplier(&self) -> Option<(f64, Option<String>)> {
-        let multiplier = self.ds.resolve_theme_value("--spacing", true)?;
+        let multiplier = self.ds.resolve_theme_value("--spacing", Inline::Always)?;
         let folded = constant_fold_declaration(multiplier, self.sig.rem, self.ds.alloc);
         dimension(&folded).map(|(value, unit)| (value, unit.map(str::to_owned)))
     }
@@ -435,20 +448,11 @@ impl<'a, 'd> Canon<'a, 'd> {
     fn prefill_utility_signatures<S: AsRef<str> + Sync>(&mut self, utilities: std::vec::Vec<S>) {
         let key = self.sig_key();
         let missing: std::vec::Vec<&str> = utilities.iter().map(AsRef::as_ref).collect();
-        let (ds, options, sig, collapse) = (self.ds.ds, self.ds.options, self.sig, self.collapse);
+        let (ds, inline, sig) = (self.ds.ds, self.ds.inline(), self.sig);
         let signatures: std::vec::Vec<Option<Signature>> = missing
             .par_chunks(1024)
             .flat_map_iter(|chunk| {
-                let alloc = Allocator::default();
-                let mut caches = Caches::default();
-                let mut storage = Storage::default();
-                // SAFETY: `DesignSystem` has no interior mutability and is only read through `&`, so nothing allocated in the
-                // shorter-lived worker arena can be stored into it; this only narrows the lifetime as covariance would.
-                let ds = unsafe { std::mem::transmute::<&DesignSystem<'a>, &DesignSystem<'_>>(ds) };
-                let mut session = Session::new(ds, &alloc, &mut caches);
-                session.options = options;
-                let mut cx = Canon { ds: session, storage: &mut storage, sig, collapse };
-                chunk.iter().map(|utility| cx.compute_utility_css(utility)).collect::<std::vec::Vec<_>>()
+                with_worker(ds, inline, sig, |cx| chunk.iter().map(|utility| cx.compute_utility_css(utility)).collect::<std::vec::Vec<_>>())
             })
             .collect();
         for (utility, signature) in missing.into_iter().zip(signatures) {
@@ -553,7 +557,7 @@ impl<'a, 'd> Canon<'a, 'd> {
             let declarations = self.with_scratch(|cx, alloc| {
                 let mut ast: Nodes<'_> = Vec::new_in(alloc);
                 cx.without_inline(|cx| {
-                    ast.extend(cx.ds.compile_ast_nodes(candidate, flags::RESPECT_IMPORTANT).iter().map(|rule| rule.node.clone_in(alloc)));
+                    ast.extend(cx.ds.compile_ast_nodes(candidate, true).iter().map(|rule| rule.node.clone_in(alloc)));
                     cx.canonicalize_ast(&mut ast, alloc);
                 });
                 let mut declarations = std::vec::Vec::new();
@@ -572,7 +576,7 @@ impl<'a, 'd> Canon<'a, 'd> {
     }
 
     fn canonicalize_candidate(&mut self, raw: &str) -> &'a str {
-        let key = (self.canon_key(), self.ds.parse_candidate(raw).0);
+        let key = (self.sig_key(), self.ds.parse_candidate(raw).0);
         if let Some(&result) = self.storage.candidates.get(&key) {
             return result;
         }
@@ -595,7 +599,7 @@ impl<'a, 'd> Canon<'a, 'd> {
                     result = result.get(prefix.len() + 1..).unwrap_or("").to_owned();
                 }
                 if !variants.is_empty() {
-                    let printed: std::vec::Vec<String> = variants.iter().map(|v| print_variant(v)).collect();
+                    let printed: std::vec::Vec<String> = variants.iter().map(|v| self.print_variant(v)).collect();
                     result = format!("{}:{result}", printed.join(":"));
                 }
                 if candidate.important {

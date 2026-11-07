@@ -1,19 +1,22 @@
 use std::fmt::Write;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use orisu_compiler::compiler::features;
 use orisu_diagnostics::CATALOG;
 use orisu_optimizer::polyfills;
 
+use crate::harness::root;
+
 /// Writes every generated file, or with `--check` fails when one is stale.
 pub fn run(args: &[String]) -> Result<(), String> {
     let check = args.iter().any(|arg| arg == "--check");
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace root");
+    let root = root();
     let outputs = [
         (root.join("packages/orisu/skills/orisu-diagnostics/SKILL.md"), orisu_diagnostics::render_skill()),
         (root.join("packages/orisu/src/codes.ts"), codes()),
         (root.join("packages/orisu/src/flags.ts"), flags()),
+        (root.join("packages/orisu/src/merge-keys.ts"), merge_keys()),
     ];
     let mut stale: Vec<&PathBuf> = Vec::new();
     for (path, content) in &outputs {
@@ -68,6 +71,23 @@ fn flags() -> String {
         "Polyfills the compiler emits, from `orisu_optimizer::polyfills`.",
         "Polyfills",
         &[("None", polyfills::NONE), ("AtProperty", polyfills::AT_PROPERTY), ("ColorMix", polyfills::COLOR_MIX), ("All", polyfills::ALL)],
+    );
+    out
+}
+
+fn merge_keys() -> String {
+    let mut out = String::from(
+        "/** Variants whose relative order changes the generated selector, from `orisu_merge::ORDER_SENSITIVE`. */\nexport const ORDER_SENSITIVE: ReadonlySet<string> = new Set([\n",
+    );
+    for variant in orisu_merge::ORDER_SENSITIVE {
+        let _ = writeln!(out, "  {variant:?},");
+    }
+    out.push_str("]);\n");
+    let alphabet = std::str::from_utf8(orisu_mangle::names::ALPHABET).expect("the alphabet is ASCII");
+    let _ = write!(
+        out,
+        "\n/** The characters of short names, from `orisu_mangle::names::ALPHABET`; the first {first} can start one. */\nexport const NAME_ALPHABET = {alphabet:?};\nexport const NAME_FIRST = {first};\n",
+        first = orisu_mangle::names::FIRST,
     );
     out
 }

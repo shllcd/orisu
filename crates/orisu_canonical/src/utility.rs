@@ -6,7 +6,6 @@ use super::fold::constant_fold;
 use super::{Canon, Signature};
 use indexmap::IndexSet;
 use orisu_allocator::AllocExt;
-use orisu_candidate::print::print_modifier;
 use orisu_candidate::{Candidate, CandidateKind, Modifier, UtilityValue};
 use orisu_parser::infer::{format_js_number, is_multiple_of_quarter, is_positive_integer, js_number};
 use orisu_parser::value::{self as vp, ValueNode};
@@ -319,7 +318,7 @@ impl<'a, 'd> Canon<'a, 'd> {
             multiplier = Some(m.abs());
         }
         let spacing = multiplier.filter(|m| is_valid_spacing_number(*m) && self.is_reasonable_bare_value(*m)).map(format_js_number);
-        let modifier = candidate.modifier().map(print_modifier);
+        let modifier = candidate.modifier().map(|m| self.print_modifier(m));
 
         let own = if let CandidateKind::Functional { root, .. } = candidate.kind { Some(root) } else { None };
         let roots = if candidate.modifier().is_some() { self.ordered_roots() } else { self.replacement_roots(target, own) };
@@ -365,7 +364,8 @@ impl<'a, 'd> Canon<'a, 'd> {
         self.ordered_roots().into_iter().filter(|root| allowed.contains(root)).collect()
     }
 
-    /// Roots whose known properties cover `target`'s; `None` when a property's producers are unknown.
+    /// Roots whose known properties cover `target`'s; `None` when a property's producers are unknown. A property no known
+    /// utility produces is only ever an arbitrary property spelled out in full.
     fn allowed_roots(&mut self, target: Signature, own: Option<&'a str>) -> Option<FxHashSet<&'a str>> {
         let properties = self.storage.signature_properties.get(&target).cloned()?;
         if properties.is_empty() {
@@ -377,7 +377,6 @@ impl<'a, 'd> Canon<'a, 'd> {
         let mut allowed: Option<FxHashSet<&'a str>> = None;
         for property in properties.iter() {
             let Some(roots) = index.get(property.as_str()) else {
-                // A property no known utility produces is only ever an arbitrary property spelled out in full.
                 if seen.contains(property) || property.starts_with("--") || own.is_none() {
                     continue;
                 }

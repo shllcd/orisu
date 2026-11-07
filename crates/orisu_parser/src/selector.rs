@@ -1,9 +1,10 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use crate::value::Sink;
+use crate::value::put;
 use orisu_allocator::{Allocator, ArenaString, Vec};
-use orisu_ast::bytes::ByteTable;
+use orisu_ast::bytes::{ByteTable, matching_close, normalize_newlines, string_end};
+use std::fmt::Write;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SNode<'a> {
@@ -52,10 +53,6 @@ impl<'a> SNode<'a> {
         self.first_byte() == Some(b':')
     }
 
-    pub fn is_class(&self) -> bool {
-        self.first_byte() == Some(b'.')
-    }
-
     pub fn children(&self) -> Option<&Vec<'a, SNode<'a>>> {
         match self {
             Self::List(n) | Self::Complex(n) | Self::Compound(n) | Self::Function(_, n) => Some(n),
@@ -88,30 +85,30 @@ pub fn to_string(ast: &[SNode<'_>], minify: bool) -> String {
     out
 }
 
-pub fn write_css(ast: &[SNode<'_>], out: &mut impl Sink, minify: bool) {
+pub fn write_css(ast: &[SNode<'_>], out: &mut impl Write, minify: bool) {
     for node in ast {
         match node {
-            SNode::Selector(v) | SNode::Value(v) => out.put(v),
+            SNode::Selector(v) | SNode::Value(v) => put(out, v),
             SNode::Combinator(v) => {
                 if minify || *v == " " {
-                    out.put(v);
+                    put(out, v);
                 } else {
-                    out.put(" ");
-                    out.put(v);
-                    out.put(" ");
+                    put(out, " ");
+                    put(out, v);
+                    put(out, " ");
                 }
             }
             SNode::Function(name, nodes) => {
-                out.put(name);
-                out.put("(");
+                put(out, name);
+                put(out, "(");
                 write_css(nodes, out, minify);
-                out.put(")");
+                put(out, ")");
             }
             SNode::Complex(nodes) | SNode::Compound(nodes) => write_css(nodes, out, minify),
             SNode::List(nodes) => {
                 for (i, n) in nodes.iter().enumerate() {
                     if i > 0 {
-                        out.put(if minify { "," } else { ", " });
+                        put(out, if minify { "," } else { ", " });
                     }
                     write_css(std::slice::from_ref(n), out, minify);
                 }
@@ -176,14 +173,7 @@ static COMBINATOR: ByteTable = ByteTable::new(b">\n +\t~");
 static SPECIAL: ByteTable = ByteTable::new(b",>\n +\t~()[.:#'\"&*\\");
 
 pub fn parse<'a>(input: &str, alloc: &'a Allocator) -> Vec<'a, SNode<'a>> {
-    let owned;
-    let input = if input.contains("\r\n") {
-        owned = input.replace("\r\n", "\n");
-        owned.as_str()
-    } else {
-        input
-    };
-    parse_in(alloc.alloc_str(input), alloc)
+    parse_in(normalize_newlines(input, alloc), alloc)
 }
 
 pub fn parse_in<'a>(input: &'a str, alloc: &'a Allocator) -> Vec<'a, SNode<'a>> {
@@ -256,19 +246,8 @@ pub fn parse_in<'a>(input: &'a str, alloc: &'a Allocator) -> Vec<'a, SNode<'a>> 
                 let name = buf.take().map_or("", |s| &input[s..i]);
                 if !matches!(name, ":not" | ":where" | ":has" | ":is" | ":-moz-any" | ":-webkit-any") {
                     let start = i + 1;
-                    let mut nesting = 0;
-                    let mut j = i + 1;
-                    while j < len {
-                        match bytes[j] {
-                            b'(' => nesting += 1,
-                            b')' if nesting == 0 => {
-                                i = j;
-                                break;
-                            }
-                            b')' => nesting -= 1,
-                            _ => {}
-                        }
-                        j += 1;
+                    if let Some(close) = matching_close(bytes, i) {
+                        i = close;
                     }
                     let contents = input.get(start..i).unwrap_or("");
                     let mut nodes = Vec::new_in(alloc);
@@ -306,35 +285,15 @@ pub fn parse_in<'a>(input: &'a str, alloc: &'a Allocator) -> Vec<'a, SNode<'a>> 
             b'[' => {
                 flush!();
                 let start = i;
-                let mut nesting = 0;
-                let mut j = i + 1;
-                while j < len {
-                    match bytes[j] {
-                        b'[' => nesting += 1,
-                        b']' if nesting == 0 => {
-                            i = j;
-                            break;
-                        }
-                        b']' => nesting -= 1,
-                        _ => {}
-                    }
-                    j += 1;
+                if let Some(close) = matching_close(bytes, i) {
+                    i = close;
                 }
                 frame.append(SNode::Selector(&input[start..=i]), alloc);
             }
             b'\'' | b'"' => {
                 buf.get_or_insert(i);
-                let mut j = i + 1;
-                while j < len {
-                    if bytes[j] == b'\\' {
-                        j += 2;
-                        continue;
-                    }
-                    if bytes[j] == ch {
-                        i = j;
-                        break;
-                    }
-                    j += 1;
+                if let Some(close) = string_end(bytes, i) {
+                    i = close;
                 }
             }
             b'&' | b'*' => {

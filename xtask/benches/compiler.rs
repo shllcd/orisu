@@ -12,7 +12,7 @@ fn main() {
 }
 
 fn compiler(alloc: &Allocator) -> Compiler<'_> {
-    compile(INPUT, alloc, Options { extension: Some(&Tailwind), ..Options::default() }).expect("the input compiles")
+    compile(INPUT, alloc, Options::new(&Tailwind)).expect("the input compiles")
 }
 
 fn classes() -> Vec<String> {

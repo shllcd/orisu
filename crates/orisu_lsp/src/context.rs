@@ -3,7 +3,8 @@
 
 use crate::document::Language;
 use memchr::memmem;
-use orisu_scanner::attributify::Attributify;
+use orisu_analyze::CLASS_ATTRIBUTE_SUFFIX;
+use orisu_candidate::attributify::{Attribute, Attributify, Value, attributes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -72,9 +73,17 @@ impl Matcher<'_> {
 
     fn attribute_regions(&self, text: &str, out: &mut Vec<Region>) {
         let bytes = text.as_bytes();
-        let mut names = Words::new(self.attributes, bytes, is_attribute_byte);
+        let words = self.attributes.iter().map(String::as_str).chain([CLASS_ATTRIBUTE_SUFFIX]);
+        let mut names = Words::new(words, bytes, is_attribute_byte);
+        let name_start = |start: usize, end: usize| {
+            if &bytes[start..end] != CLASS_ATTRIBUTE_SUFFIX.as_bytes() {
+                return start;
+            }
+            bytes[..start].iter().rposition(|&b| !b.is_ascii_alphanumeric()).map_or(0, |n| n + 1)
+        };
         let mut i = 0;
         while let Some((start, end)) = names.next(bytes, i, |start, end| {
+            let start = name_start(start, end);
             (start == 0 || bytes[start - 1].is_ascii_whitespace()) && !bytes.get(end).is_some_and(|&b| is_attribute_byte(b))
         }) {
             i = end;
@@ -102,7 +111,7 @@ impl Matcher<'_> {
 
     fn function_regions(&self, text: &str, out: &mut Vec<Region>) {
         let bytes = text.as_bytes();
-        let mut names = Words::new(self.functions, bytes, is_ident_byte);
+        let mut names = Words::new(self.functions.iter().map(String::as_str), bytes, is_ident_byte);
         let mut i = 0;
         while let Some((start, end)) = names.next(bytes, i, |start, end| {
             (start == 0 || !is_ident_byte(bytes[start - 1])) && !bytes.get(end).is_some_and(|&b| is_ident_byte(b))
@@ -128,59 +137,17 @@ impl Matcher<'_> {
     }
 
     fn attributify_regions(&self, text: &str, attributify: &Attributify, out: &mut Vec<Region>) {
-        let bytes = text.as_bytes();
-        let mut i = 0;
-        while let Some(at) = memchr(&bytes[i..], b'<') {
-            i += at + 1;
-            if !bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
+        for Attribute { name, value } in attributes(text.as_bytes()) {
+            let name_text = &text[name.clone()];
+            if !attributify.accepts(name_text.as_bytes()) || self.attributes.iter().any(|a| a == name_text) {
                 continue;
             }
-            while bytes.get(i).is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b':' | b'_')) {
-                i += 1;
-            }
-            loop {
-                i = skip_whitespace(bytes, i);
-                match bytes.get(i) {
-                    None | Some(b'>' | b'<') => break,
-                    Some(b'/') if bytes.get(i + 1) == Some(&b'>') => break,
-                    Some(b'{') => {
-                        i = js_strings(bytes, i, &mut Vec::new());
-                        continue;
-                    }
-                    Some(b'"' | b'\'' | b'=' | b'}' | b'/') => {
-                        i += 1;
-                        continue;
-                    }
-                    _ => {}
+            match value {
+                None => out.push(Region::new(name.start, name.end, Scope::Bare)),
+                Some(Value::Quoted(range) | Value::Bare(range)) => {
+                    out.push(Region::new(range.start, range.end, Scope::Attribute(name_text.to_owned())))
                 }
-                let start = i;
-                while bytes
-                    .get(i)
-                    .is_some_and(|&b| !b.is_ascii_whitespace() && !matches!(b, b'=' | b'>' | b'<' | b'"' | b'\'' | b'{' | b'}'))
-                {
-                    i += 1;
-                }
-                let name = &text[start..i];
-                let accepted = attributify.accepts(name.as_bytes()) && !self.attributes.iter().any(|a| a == name);
-                let mut j = skip_whitespace(bytes, i);
-                if bytes.get(j) != Some(&b'=') {
-                    if accepted {
-                        out.push(Region::new(start, i, Scope::Bare));
-                    }
-                    continue;
-                }
-                j = skip_whitespace(bytes, j + 1);
-                match bytes.get(j) {
-                    Some(&quote @ (b'"' | b'\'')) => {
-                        let end = memchr_from(bytes, j + 1, quote);
-                        if accepted {
-                            out.push(Region::new(j + 1, end, Scope::Attribute(name.to_owned())));
-                        }
-                        i = end + 1;
-                    }
-                    Some(b'{') => i = js_strings(bytes, j, &mut Vec::new()),
-                    _ => i = j,
-                }
+                Some(Value::Expression(_)) => {}
             }
         }
     }
@@ -194,9 +161,9 @@ struct Words<'w> {
 
 impl<'w> Words<'w> {
     /// Finds `words` in `bytes`, skipping those with a byte outside `valid`, which can never be a whole word.
-    fn new(words: &'w [String], bytes: &[u8], valid: fn(u8) -> bool) -> Self {
+    fn new(words: impl IntoIterator<Item = &'w str>, bytes: &[u8], valid: fn(u8) -> bool) -> Self {
         let finders = words
-            .iter()
+            .into_iter()
             .filter(|word| !word.is_empty() && word.bytes().all(valid))
             .map(|word| {
                 let finder = memmem::Finder::new(word.as_bytes());
@@ -430,12 +397,8 @@ fn string_end(bytes: &[u8], mut i: usize, quote: u8) -> usize {
     bytes.len()
 }
 
-fn memchr(bytes: &[u8], needle: u8) -> Option<usize> {
-    bytes.iter().position(|&b| b == needle)
-}
-
 fn memchr_from(bytes: &[u8], from: usize, needle: u8) -> usize {
-    memchr(&bytes[from..], needle).map_or(bytes.len(), |n| from + n)
+    memchr::memchr(needle, &bytes[from..]).map_or(bytes.len(), |n| from + n)
 }
 
 fn skip_whitespace(bytes: &[u8], mut i: usize) -> usize {

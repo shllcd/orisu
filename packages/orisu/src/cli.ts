@@ -4,16 +4,18 @@
 
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
+import { formatOptions } from "./args.ts";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { canonicalize } from "./canonicalize.ts";
 import { check } from "./check.ts";
 import { manifest } from "./manifest.ts";
-import { compile, lsp, optimize, Scanner, type Compiler } from "./index.ts";
-import type { ChangedContent, SourceEntry } from "./native.ts";
+import { compile, lsp, optimize, Scanner, scanSources, type Compiler } from "./index.ts";
+import type { ChangedContent } from "./native.ts";
 import { encodeMergeTable } from "./table.ts";
 
-const VERSION = "0.4.0";
+const VERSION = (createRequire(import.meta.url)("../package.json") as { version: string }).version;
 const DEFAULT_INPUT = '@import "tailwindcss";\n';
 const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEBOUNCE_MS = 10;
@@ -121,7 +123,9 @@ const outputFile = async (file: string, contents: string) => {
   if (!special) {
     try {
       if ((await fs.readFile(file, "utf8")) === contents) return;
-    } catch {}
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, contents, "utf8");
@@ -153,11 +157,7 @@ const help = (invalid?: string) => {
     `  lsp ${dim("·".repeat(12))} Start the language server on stdio`,
   );
   out.push("", "Options:");
-  for (const [name, option] of Object.entries(OPTIONS)) {
-    const flag = ("short" in option ? `-${option.short}, ` : "    ") + `--${name}`;
-    const fallback = "default" in option ? ` ${dim(`[default: ${option.default}]`)}` : "";
-    out.push(`  ${flag.padEnd(18)}${dim("·".repeat(4))} ${option.description}${fallback}`);
-  }
+  out.push(...formatOptions(OPTIONS, dim));
   eprintln(out.join("\n"));
 };
 
@@ -235,10 +235,7 @@ const run = async (args: Args) => {
   const createCompiler = async (css: string): Promise<[Compiler, InstanceType<typeof Scanner>]> => {
     const compiler = await compile(css, { base: inputBase, onDependency: (file) => fullRebuildPaths.push(file) });
     seen.clear();
-    const root = compiler.root;
-    const sources: SourceEntry[] =
-      root === "none" ? [] : root === null ? [{ base, pattern: "**/*", negated: false }] : [{ ...root, negated: false }];
-    sources.push(...compiler.sources);
+    const sources = scanSources(compiler, base);
     sources.push({ base: path.dirname(process.execPath), pattern: path.basename(process.execPath), negated: true });
     if (inputFile) sources.push({ base: path.dirname(inputFile), pattern: path.basename(inputFile), negated: false });
     return [compiler, new Scanner({ sources, attributify: compiler.attributify, cache: cacheDir(base) })];

@@ -10,7 +10,14 @@ use rustc_hash::FxHashMap;
 use std::path::Path;
 
 /// Functions whose arguments are class lists.
-const CLASS_FUNCTIONS: &[&str] = &["cn", "clsx", "cx", "classnames", "classNames", "twMerge", "twJoin"];
+pub const DEFAULT_CLASS_FUNCTIONS: &[&str] = &["cn", "clsx", "cx", "classnames", "classNames", "twMerge", "twJoin"];
+
+/// Attributes and properties whose values are class lists.
+pub const DEFAULT_CLASS_ATTRIBUTES: &[&str] =
+    &["class", "className", "ngClass", "[ngClass]", "class:list", ":class", "v-bind:class", "[class]"];
+
+/// The ending of attributes and properties that also hold class lists, like `buttonClassName`.
+pub const CLASS_ATTRIBUTE_SUFFIX: &str = "ClassName";
 
 /// Libraries that merge classes by their names, which renamed classes no longer carry.
 const NAME_MERGERS: &[&str] = &["tailwind-merge", "tailwind-variants"];
@@ -22,9 +29,10 @@ const NO_TOUCH: (bool, bool) = (false, false);
 /// Class positions beyond the built-in ones.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// Functions whose arguments are class lists, like `cn`.
+    /// Functions whose arguments are class lists, besides [`DEFAULT_CLASS_FUNCTIONS`].
     pub functions: Vec<String>,
-    /// Attributes and properties whose values are class lists, like `className`.
+    /// Attributes and properties whose values are class lists, besides [`DEFAULT_CLASS_ATTRIBUTES`] and those ending
+    /// in [`CLASS_ATTRIBUTE_SUFFIX`].
     pub attributes: Vec<String>,
 }
 
@@ -159,7 +167,10 @@ struct Walker<'s> {
 
 impl<'a> Walker<'_> {
     fn class_name(&self, name: &str) -> Option<Mode> {
-        if matches!(name, "class" | "className") || name.ends_with("ClassName") || self.options.attributes.iter().any(|a| a == name) {
+        if DEFAULT_CLASS_ATTRIBUTES.contains(&name)
+            || name.ends_with(CLASS_ATTRIBUTE_SUFFIX)
+            || self.options.attributes.iter().any(|a| a == name)
+        {
             Some(Mode::List)
         } else if name == "classNames" || name.ends_with("ClassNames") {
             Some(Mode::Dict(1))
@@ -169,7 +180,7 @@ impl<'a> Walker<'_> {
     }
 
     fn is_class_function(&self, name: &str) -> bool {
-        CLASS_FUNCTIONS.contains(&name) || self.options.functions.iter().any(|f| f == name)
+        DEFAULT_CLASS_FUNCTIONS.contains(&name) || self.options.functions.iter().any(|f| f == name)
     }
 
     fn fragment(&mut self, text: &str, left: bool, right: bool) {
@@ -220,7 +231,7 @@ impl<'a> Walker<'_> {
             self.class_text(quasi.span.start, raw, value, (i > 0 || touch.0, i < last || touch.1));
         }
         for expression in &template.expressions {
-            self.class_expr(expression, Mode::List, NO_TOUCH);
+            self.class_expr(expression, Mode::List);
         }
     }
 
@@ -309,13 +320,13 @@ impl<'a> Walker<'_> {
                             self.out.tokens.push(Token { start: id.span.start, end: id.span.end, quote: true });
                         }
                         key => match key.as_expression() {
-                            Some(expr) if p.computed => self.class_expr(expr, Mode::List, NO_TOUCH),
+                            Some(expr) if p.computed => self.class_expr(expr, Mode::List),
                             _ => self.visit_property_key(key),
                         },
                     }
                     self.visit_expression(&p.value);
                 }
-                ObjectPropertyKind::SpreadProperty(spread) => self.class_expr(&spread.argument, Mode::List, NO_TOUCH),
+                ObjectPropertyKind::SpreadProperty(spread) => self.class_expr(&spread.argument, Mode::List),
             }
         }
     }
@@ -328,39 +339,44 @@ impl<'a> Walker<'_> {
                     if p.computed || matches!(p.key, PropertyKey::StringLiteral(_)) {
                         self.visit_property_key(&p.key);
                     }
-                    self.class_expr(&p.value, inner, NO_TOUCH);
+                    self.class_expr(&p.value, inner);
                 }
-                ObjectPropertyKind::SpreadProperty(spread) => self.class_expr(&spread.argument, Mode::Dict(depth), NO_TOUCH),
+                ObjectPropertyKind::SpreadProperty(spread) => self.class_expr(&spread.argument, Mode::Dict(depth)),
             }
         }
     }
 
     fn class_argument(&mut self, argument: &Argument<'a>) {
         match argument {
-            Argument::SpreadElement(spread) => self.class_expr(&spread.argument, Mode::List, NO_TOUCH),
+            Argument::SpreadElement(spread) => self.class_expr(&spread.argument, Mode::List),
             argument => match argument.as_expression() {
-                Some(expr) => self.class_expr(expr, Mode::List, NO_TOUCH),
+                Some(expr) => self.class_expr(expr, Mode::List),
                 None => self.visit_argument(argument),
             },
         }
     }
 
-    fn class_expr(&mut self, expr: &Expression<'a>, mode: Mode, touch: (bool, bool)) {
+    fn class_expr(&mut self, expr: &Expression<'a>, mode: Mode) {
+        self.class_expr_touching(expr, mode, NO_TOUCH);
+    }
+
+    /// Like `class_expr`, where `touch` tells whether runtime text joins the expression on its left and right.
+    fn class_expr_touching(&mut self, expr: &Expression<'a>, mode: Mode, touch: (bool, bool)) {
         match (expr.get_inner_expression(), mode) {
             (Expression::StringLiteral(literal), Mode::List) => self.class_string(literal, touch),
             (Expression::TemplateLiteral(template), Mode::List) => self.class_template(template, touch),
             (Expression::BinaryExpression(binary), Mode::List) if binary.operator == BinaryOperator::Addition => {
-                self.class_expr(&binary.left, mode, (touch.0, true));
-                self.class_expr(&binary.right, mode, (true, touch.1));
+                self.class_expr_touching(&binary.left, mode, (touch.0, true));
+                self.class_expr_touching(&binary.right, mode, (true, touch.1));
             }
             (Expression::ArrayExpression(array), Mode::List) => {
                 for element in &array.elements {
                     match element {
-                        ArrayExpressionElement::SpreadElement(spread) => self.class_expr(&spread.argument, Mode::List, NO_TOUCH),
+                        ArrayExpressionElement::SpreadElement(spread) => self.class_expr(&spread.argument, Mode::List),
                         ArrayExpressionElement::Elision(_) => {}
                         element => {
                             if let Some(expr) = element.as_expression() {
-                                self.class_expr(expr, Mode::List, NO_TOUCH);
+                                self.class_expr(expr, Mode::List);
                             }
                         }
                     }
@@ -370,23 +386,23 @@ impl<'a> Walker<'_> {
             (Expression::ObjectExpression(object), Mode::Dict(depth)) => self.class_values(object, depth),
             (Expression::ConditionalExpression(conditional), _) => {
                 self.visit_expression(&conditional.test);
-                self.class_expr(&conditional.consequent, mode, touch);
-                self.class_expr(&conditional.alternate, mode, touch);
+                self.class_expr_touching(&conditional.consequent, mode, touch);
+                self.class_expr_touching(&conditional.alternate, mode, touch);
             }
             (Expression::LogicalExpression(logical), _) => {
                 if logical.operator == LogicalOperator::And {
                     self.visit_expression(&logical.left);
                 } else {
-                    self.class_expr(&logical.left, mode, touch);
+                    self.class_expr_touching(&logical.left, mode, touch);
                 }
-                self.class_expr(&logical.right, mode, touch);
+                self.class_expr_touching(&logical.right, mode, touch);
             }
             (Expression::SequenceExpression(sequence), _) => {
                 let (last, rest) = sequence.expressions.split_last().expect("a sequence has expressions");
                 for expr in rest {
                     self.visit_expression(expr);
                 }
-                self.class_expr(last, mode, touch);
+                self.class_expr_touching(last, mode, touch);
             }
             (Expression::Identifier(id), _) => self.use_reference(id, mode),
             (member @ (Expression::StaticMemberExpression(_) | Expression::ComputedMemberExpression(_)), _) => {
@@ -403,7 +419,7 @@ impl<'a> Walker<'_> {
         for property in &object.properties {
             match property {
                 ObjectPropertyKind::ObjectProperty(p) if !p.computed && p.key.static_name().as_deref() == Some("variants") => {
-                    self.class_expr(&p.value, Mode::Dict(2), NO_TOUCH);
+                    self.class_expr(&p.value, Mode::Dict(2));
                 }
                 property => self.visit_object_property_kind(property),
             }
@@ -476,7 +492,7 @@ impl<'a> Visit<'a> for Walker<'_> {
         match &attribute.value {
             Some(JSXAttributeValue::StringLiteral(literal)) if mode == Mode::List => self.class_string(literal, NO_TOUCH),
             Some(JSXAttributeValue::ExpressionContainer(container)) => match container.expression.as_expression() {
-                Some(expr) => self.class_expr(expr, mode, NO_TOUCH),
+                Some(expr) => self.class_expr(expr, mode),
                 None => self.visit_jsx_expression_container(container),
             },
             Some(value) => self.visit_jsx_attribute_value(value),
@@ -487,7 +503,7 @@ impl<'a> Visit<'a> for Walker<'_> {
     fn visit_object_property(&mut self, property: &ObjectProperty<'a>) {
         let mode = if property.computed { None } else { property.key.static_name().and_then(|name| self.class_name(&name)) };
         match mode {
-            Some(mode) => self.class_expr(&property.value, mode, NO_TOUCH),
+            Some(mode) => self.class_expr(&property.value, mode),
             None => walk::walk_object_property(self, property),
         }
     }
@@ -499,7 +515,7 @@ impl<'a> Visit<'a> for Walker<'_> {
         {
             self.visit_expression(&member.object);
             let touch = (assignment.operator == AssignmentOperator::Addition, false);
-            return self.class_expr(&assignment.right, mode, touch);
+            return self.class_expr_touching(&assignment.right, mode, touch);
         }
         walk::walk_assignment_expression(self, assignment);
     }
@@ -509,7 +525,7 @@ impl<'a> Visit<'a> for Walker<'_> {
             && let Some(mode) = self.class_name(&id.name)
         {
             self.visit_binding_pattern(&pattern.left);
-            return self.class_expr(&pattern.right, mode, NO_TOUCH);
+            return self.class_expr(&pattern.right, mode);
         }
         walk::walk_assignment_pattern(self, pattern);
     }
@@ -520,7 +536,7 @@ impl<'a> Visit<'a> for Walker<'_> {
             && let Some(mode) = property.key.static_name().and_then(|name| self.class_name(&name))
         {
             self.visit_binding_pattern(&pattern.left);
-            return self.class_expr(&pattern.right, mode, NO_TOUCH);
+            return self.class_expr(&pattern.right, mode);
         }
         walk::walk_binding_property(self, property);
     }
@@ -540,7 +556,7 @@ impl<'a> Visit<'a> for Walker<'_> {
                 self.consts.push(symbol);
             }
             if let Some(&mode) = self.class_consts.get(&symbol) {
-                return self.class_expr(init, mode, NO_TOUCH);
+                return self.class_expr(init, mode);
             }
         }
         walk::walk_variable_declarator(self, declarator);

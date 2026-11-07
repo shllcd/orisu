@@ -1,4 +1,3 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -33,84 +32,9 @@ export interface CompileOptions {
   customCssResolver?: Resolver;
 }
 
-const isFile = (file: string): boolean => {
-  try {
-    return statSync(file).isFile();
-  } catch {
-    return false;
-  }
-};
-
-const STYLE_CONDITIONS = ["style", "development", "production", "import", "default"];
-
-const pickExport = (target: unknown): string | undefined => {
-  if (typeof target === "string") return target;
-  if (Array.isArray(target)) {
-    for (const item of target) {
-      const picked = pickExport(item);
-      if (picked) return picked;
-    }
-    return undefined;
-  }
-  if (target && typeof target === "object") {
-    for (const [condition, value] of Object.entries(target)) {
-      if (!STYLE_CONDITIONS.includes(condition)) continue;
-      const picked = pickExport(value);
-      if (picked) return picked;
-    }
-  }
-  return undefined;
-};
-
-const resolvePackage = (dir: string, subpath: string): string | undefined => {
-  const manifest = path.join(dir, "package.json");
-  if (!existsSync(manifest)) {
-    const file = path.join(dir, subpath);
-    return isFile(file) ? file : isFile(file + ".css") ? file + ".css" : undefined;
-  }
-  const pkg = JSON.parse(readFileSync(manifest, "utf8")) as Record<string, unknown>;
-  const key = subpath ? "./" + subpath : ".";
-  const exports = pkg.exports as Record<string, unknown> | string | undefined;
-  if (exports !== undefined) {
-    const map =
-      typeof exports === "string" || Array.isArray(exports) || !Object.keys(exports)[0]?.startsWith(".") ? { ".": exports } : exports;
-    const target = pickExport(map[key]) ?? pickExport(map[key + ".css"]);
-    if (target) return path.join(dir, target);
-  }
-  if (subpath) {
-    const file = path.join(dir, subpath);
-    return isFile(file) ? file : isFile(file + ".css") ? file + ".css" : undefined;
-  }
-  for (const field of [pkg.style, pkg.main]) {
-    if (typeof field === "string" && field.endsWith(".css")) return path.join(dir, field);
-  }
-  const index = path.join(dir, "index.css");
-  return isFile(index) ? index : undefined;
-};
-
-/** Node-style CSS resolution: relative files, then packages via `exports` (`style` condition), `style` and `main`. */
-export const resolveCss = (id: string, base: string): string | undefined => {
-  if (id.startsWith(".") || path.isAbsolute(id)) {
-    const file = path.resolve(base, id);
-    return isFile(file) ? file : isFile(file + ".css") ? file + ".css" : undefined;
-  }
-  const parts = id.split("/");
-  const name = id.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;
-  const subpath = parts.slice(id.startsWith("@") ? 2 : 1).join("/");
-  const roots: string[] = [];
-  for (let dir = path.resolve(base); ; dir = path.dirname(dir)) {
-    roots.push(path.join(dir, "node_modules"));
-    if (path.dirname(dir) === dir) break;
-  }
-  roots.push(...(process.env.NODE_PATH ?? "").split(path.delimiter).filter(Boolean));
-  for (const root of roots) {
-    const dir = path.join(root, name);
-    if (!existsSync(dir)) continue;
-    const resolved = resolvePackage(dir, subpath);
-    if (resolved) return resolved;
-  }
-  return undefined;
-};
+/** Node-style CSS resolution: relative files, then packages in `node_modules` and `NODE_PATH` via `exports` (style conditions),
+ * `style`, `main` and `index.css`. */
+export const resolveCss = (id: string, base: string): string | undefined => native.resolveCss(id, base) ?? undefined;
 
 const loadStylesheet = async (id: string, base: string, options: CompileOptions): Promise<native.LoadedStylesheet> => {
   const resolved = (await options.customCssResolver?.(id, base)) || resolveCss(id, base);
@@ -158,6 +82,13 @@ type LightningCss = typeof import("lightningcss");
 let lightningcss: Promise<LightningCss | null> | undefined;
 
 /** Lowers and minifies CSS with Lightning CSS (same settings as Tailwind), or returns it untouched when missing. */
+/** The scanner sources of a compiled stylesheet: its `source(…)` root (`null` scans `base`, `"none"` nothing), then its `@source` entries. */
+export const scanSources = (compiler: native.Compiler, base: string): native.SourceEntry[] => {
+  const root = compiler.root;
+  const sources = root === "none" ? [] : [root === null ? { base, pattern: "**/*", negated: false } : { ...root, negated: false }];
+  return sources.concat(compiler.sources);
+};
+
 export const optimize = async (input: string, { file = "input.css", minify = false }: OptimizeOptions = {}) => {
   lightningcss ??= import("lightningcss").catch(() =>
     import(pathToFileURL(createRequire(path.join(process.cwd(), "package.json")).resolve("lightningcss")).href).then(

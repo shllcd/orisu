@@ -11,11 +11,10 @@ use orisu_candidate::{self, Candidate, CandidateKind, Registry, Variant, Variant
 use orisu_optimizer::{optimize_ast, polyfills};
 use orisu_registry::utilities::{self, Cx, Declared, Utilities, UtilityKind};
 use orisu_registry::variants::{self, Variants};
-use orisu_theme::{Theme, UsedVars, opts};
+use orisu_theme::{Inline, Theme, UsedVars};
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::ops::Deref;
-
-const IGNORE_INLINE_KEY: u8 = 1 << 7;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type ExtensionRef<'a> = &'a (dyn Extension<'a> + Sync + 'a);
 
@@ -25,8 +24,9 @@ pub struct DesignSystem<'a> {
     pub variants: Variants<'a>,
     pub invalid_candidates: FxHashSet<&'a str>,
     pub important: bool,
-    pub attributify: Option<crate::attributify::Attributify<'a>>,
-    extension: Option<ExtensionRef<'a>>,
+    pub attributify: Option<orisu_candidate::attributify::Attributify>,
+    extension: ExtensionRef<'a>,
+    id: u64,
 }
 
 const _: () = {
@@ -35,18 +35,23 @@ const _: () = {
 };
 
 impl<'a> DesignSystem<'a> {
-    pub fn new(alloc: &'a Allocator, theme: Theme<'a>, extension: Option<ExtensionRef<'a>>) -> Self {
+    pub fn new(alloc: &'a Allocator, theme: Theme<'a>, extension: ExtensionRef<'a>) -> Self {
         let mut utilities = Utilities::default();
         utilities::register_builtin(&mut utilities, &theme, alloc);
-        if let Some(extension) = extension {
-            extension.register_utilities(&mut utilities, &theme, alloc);
-        }
+        extension.register_utilities(&mut utilities, &theme, alloc);
         let mut variants = Variants::default();
         variants::register_builtin(&mut variants, &theme, alloc);
-        Self { theme, utilities, variants, invalid_candidates: FxHashSet::default(), important: false, attributify: None, extension }
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        Self { theme, utilities, variants, invalid_candidates: FxHashSet::default(), important: false, attributify: None, extension, id }
     }
 
-    pub fn extension(&self) -> Option<ExtensionRef<'a>> {
+    /// Distinct for every design system of the process, so caches can tell which one they belong to.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn extension(&self) -> ExtensionRef<'a> {
         self.extension
     }
 }
@@ -56,15 +61,14 @@ impl<'a> DesignSystem<'a> {
 pub struct Caches<'a> {
     parsed_variants: IndexMap<&'a str, Option<&'a Variant<'a>>, FxBuildHasher>,
     parsed_candidates: FxHashMap<&'a str, &'a [Candidate<'a>]>,
-    compiled: FxHashMap<(Candidate<'a>, u8), &'a [CompiledRule<'a>]>,
+    compiled: FxHashMap<(Candidate<'a>, bool, Inline), &'a [CompiledRule<'a>]>,
 }
 
 /// A design system with the arena and caches of one compiler, project or canonicalizer.
 pub struct Session<'s, 'a> {
     pub ds: &'s DesignSystem<'a>,
     pub alloc: &'a Allocator,
-    /// [`opts`] flags applied to every theme lookup, such as [`opts::IGNORE_INLINE`] while canonicalizing.
-    pub options: u8,
+    inline: Inline,
     caches: &'s mut Caches<'a>,
 }
 
@@ -78,12 +82,21 @@ impl<'a> Deref for Session<'_, 'a> {
 
 impl<'s, 'a> Session<'s, 'a> {
     pub fn new(ds: &'s DesignSystem<'a>, alloc: &'a Allocator, caches: &'s mut Caches<'a>) -> Self {
-        Self { ds, alloc, options: opts::NONE, caches }
+        Self { ds, alloc, inline: Inline::AsDeclared, caches }
+    }
+
+    /// The same session, sharing its caches, with utilities resolving theme values under `inline`.
+    pub fn with_inline(&mut self, inline: Inline) -> Session<'_, 'a> {
+        Session { ds: self.ds, alloc: self.alloc, inline, caches: &mut *self.caches }
+    }
+
+    pub fn inline(&self) -> Inline {
+        self.inline
     }
 
     #[inline]
     pub fn cx(&self) -> Cx<'a, 's> {
-        Cx { theme: &self.ds.theme, alloc: self.alloc, options: self.options }
+        Cx { theme: &self.ds.theme, alloc: self.alloc, inline: self.inline }
     }
 
     /// Returns the arena-interned raw string together with its parsed candidates.
@@ -97,12 +110,13 @@ impl<'s, 'a> Session<'s, 'a> {
         (raw, candidates)
     }
 
-    pub fn compile_ast_nodes(&mut self, candidate: &Candidate<'a>, flags: u8) -> &'a [CompiledRule<'a>] {
-        let key = (*candidate, if self.options & opts::IGNORE_INLINE != 0 { flags | IGNORE_INLINE_KEY } else { flags });
+    /// A `theme()` or `--theme()` that fails to resolve yields no rules: the candidate is reported as invalid, without the reason.
+    pub fn compile_ast_nodes(&mut self, candidate: &Candidate<'a>, respect_important: bool) -> &'a [CompiledRule<'a>] {
+        let key = (*candidate, respect_important, self.inline);
         if let Some(&rules) = self.caches.compiled.get(&key) {
             return rules;
         }
-        let mut rules = compile::compile_ast_nodes(candidate, self, flags);
+        let mut rules = compile::compile_ast_nodes(candidate, self, respect_important);
         for rule in &mut rules {
             if substitute_functions(std::slice::from_mut(&mut rule.node), self).is_err() {
                 rules.clear();
@@ -123,50 +137,32 @@ impl<'s, 'a> Session<'s, 'a> {
             if !candidate.variants.is_empty() || candidate.modifier().is_some() {
                 return None;
             }
-            let kind = match candidate.kind {
-                CandidateKind::Arbitrary { .. } => return None,
-                CandidateKind::Static { .. } => UtilityKind::Static,
-                CandidateKind::Functional { .. } => UtilityKind::Functional,
-            };
-            let root = match candidate.kind {
-                CandidateKind::Static { root } | CandidateKind::Functional { root, .. } => root,
-                CandidateKind::Arbitrary { .. } => unreachable!(),
-            };
-            let mut found = false;
-            for fallback in [false, true] {
-                for utility in self.utilities.get(root) {
-                    if utility.kind != kind || utility.is_fallback() != fallback {
-                        continue;
-                    }
-                    match utility.declarations(&self.cx(), candidate) {
-                        Declared::Yes(declarations) => {
-                            out.extend(declarations);
-                            found = true;
-                        }
-                        Declared::No => {}
-                        Declared::Unknown => return None,
-                    }
-                }
-                if found {
-                    break;
-                }
+            if let CandidateKind::Arbitrary { .. } = candidate.kind {
+                return None;
             }
+            let found = match self.utilities.declarations(&self.cx(), candidate) {
+                Declared::Yes(declarations) => {
+                    out.extend(declarations);
+                    true
+                }
+                Declared::No => false,
+                Declared::Unknown => return None,
+            };
             found_any |= found;
         }
         found_any.then_some(out)
     }
 
-    pub fn resolve_theme_value(&self, path: &str, force_inline: bool) -> Option<&'a str> {
-        if !path.starts_with("--")
-            && let Some(extension) = self.extension
-        {
-            return extension.resolve_theme(self, path);
+    /// Resolves a `theme()` path; `inline` applies to it instead of the session's mode.
+    pub fn resolve_theme_value(&self, path: &str, inline: Inline) -> Option<&'a str> {
+        if !path.starts_with("--") {
+            return self.extension.resolve_theme(self, path);
         }
         let (path, modifier) = match path.rfind('/') {
             Some(i) => (path[..i].trim(), Some(path[i + 1..].trim())),
             None => (path, None),
         };
-        let value = self.theme.resolve(None, &[path], if force_inline { opts::INLINE } else { opts::NONE })?;
+        let value = self.theme.resolve(None, &[path], inline)?;
         match modifier {
             Some(modifier) if !modifier.is_empty() => Some(self.cx().with_alpha(value, self.alloc.str(modifier))),
             _ => Some(value),
@@ -233,6 +229,11 @@ impl<'a> Registry<'a> for Session<'_, 'a> {
     #[inline]
     fn compounds_with(&self, root: &str, variant: &Variant<'a>) -> bool {
         self.variants.compounds_with(root, variant)
+    }
+
+    #[inline]
+    fn modifier_in_value(&self, root: &str) -> bool {
+        self.variants.get(root).is_some_and(|entry| entry.rules.modifier_in_value)
     }
 
     fn parse_variant(&mut self, raw: &'a str) -> Option<&'a Variant<'a>> {

@@ -155,7 +155,8 @@ impl Cache {
     }
 
     /// Writes the file when it changed; with `prune`, first drops the entries no lookup asked for since the last save.
-    /// Only the candidates of kept entries are written.
+    /// Only the candidates of kept entries are written. The cache only saves work, so a failed write costs the next run a
+    /// rescan of the files and nothing else; the scanner ignores the error.
     pub fn save(&mut self, prune: bool) -> io::Result<()> {
         if prune && self.entries.len() != self.used.len() {
             let used = &self.used;

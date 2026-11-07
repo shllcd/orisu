@@ -8,6 +8,7 @@ use orisu_compat_tailwind::Tailwind;
 use orisu_compiler::compiler::{Options, compile};
 
 use crate::conformance::load_stylesheet;
+use crate::harness::{count, git, root};
 
 const USAGE: &str = "usage: cargo xtask bench <input.css> <candidates.txt> [--runs N] [--hmr N] [--against <git-rev>]";
 
@@ -31,7 +32,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let [css, candidates] = positional.as_slice() else {
         return Err(USAGE.to_owned());
     };
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives in the workspace root");
+    let root = root();
     let bench = root.join("target/bench");
     fs::create_dir_all(&bench).map_err(|e| e.to_string())?;
 
@@ -78,8 +79,7 @@ pub fn workload(args: &[String]) -> Result<(), String> {
     let candidates = fs::read_to_string(candidates).map_err(|e| format!("{candidates}: {e}"))?;
     let base = Path::new(css).parent().map(|dir| dir.to_string_lossy().into_owned()).unwrap_or_default();
     let alloc = Allocator::new();
-    let options =
-        Options { base: &base, load_stylesheet: Some(Box::new(load_stylesheet)), extension: Some(&Tailwind), ..Options::default() };
+    let options = Options { base: &base, load_stylesheet: Some(Box::new(load_stylesheet)), ..Options::new(&Tailwind) };
     let mut compiler = compile(&input, &alloc, options).map_err(|e| e.to_string())?;
     let candidates: Vec<&str> = candidates.split_whitespace().collect();
     let (base, added) = candidates.split_at(candidates.len().saturating_sub(hmr));
@@ -105,11 +105,6 @@ fn build(dir: &Path, target: &Path) -> Result<PathBuf, String> {
     Ok(target.join("release/xtask"))
 }
 
-pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let status = Command::new("git").args(args).current_dir(dir).status().map_err(|e| e.to_string())?;
-    if status.success() { Ok(()) } else { Err(format!("git {} failed", args.join(" "))) }
-}
-
 /// The minimum instruction count over `runs`, and the bytes the workload wrote. With `hmr`, the count is that of one
 /// incremental build: the difference to a run that skips the incremental builds, divided by `hmr`.
 fn measure(binary: &Path, css: &Path, candidates: &Path, runs: usize, hmr: usize, out: &Path) -> Result<(u64, Vec<u8>), String> {
@@ -121,7 +116,7 @@ fn measure(binary: &Path, css: &Path, candidates: &Path, runs: usize, hmr: usize
             if hmr > 0 {
                 args.extend([OsStr::new(&hmr_arg), OsStr::new(mode)]);
             }
-            best = best.min(count(binary.as_os_str(), &args)?.0);
+            best = best.min(count(binary.as_os_str(), &args)?.0.instructions);
         }
         Ok(best)
     };
@@ -132,30 +127,4 @@ fn measure(binary: &Path, css: &Path, candidates: &Path, runs: usize, hmr: usize
         min("full")?.saturating_sub(setup) / hmr as u64
     };
     Ok((instructions, fs::read(out).map_err(|e| e.to_string())?))
-}
-
-/// User-space instructions of one run of `program` and its stdout.
-pub(crate) fn count(program: &OsStr, args: &[&OsStr]) -> Result<(u64, String), String> {
-    let (counter, counter_args) = counter().split_first().expect("the counter is a command");
-    let output = Command::new(counter).args(counter_args).arg(program).args(args).output().map_err(|e| e.to_string())?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        return Err(stderr.into_owned());
-    }
-    let instructions = instructions(&stderr).ok_or_else(|| format!("no instruction count in:\n{stderr}"))?;
-    Ok((instructions, String::from_utf8_lossy(&output.stdout).into_owned()))
-}
-
-/// The command prefix that makes a program report its user-space instructions on stderr: `perf stat` on Linux, `time -l` on macOS.
-pub(crate) fn counter() -> &'static [&'static str] {
-    if cfg!(target_os = "macos") { &["/usr/bin/time", "-l"] } else { &["perf", "stat", "-x,", "-e", "instructions:u", "--"] }
-}
-
-/// The instruction count `counter` reported in `stderr`.
-pub(crate) fn instructions(stderr: &str) -> Option<u64> {
-    if cfg!(target_os = "macos") {
-        stderr.lines().find_map(|line| line.trim().strip_suffix("instructions retired")).and_then(|n| n.trim().parse().ok())
-    } else {
-        stderr.lines().find(|line| line.contains("instructions")).and_then(|line| line.split(',').next()).and_then(|n| n.parse().ok())
-    }
 }

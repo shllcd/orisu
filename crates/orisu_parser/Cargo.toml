@@ -9,6 +9,5 @@ publish.workspace = true
 [dependencies]
 orisu_allocator.workspace = true
 orisu_ast.workspace = true
-indexmap.workspace = true
 smallvec.workspace = true
 memchr.workspace = true

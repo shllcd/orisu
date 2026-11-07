@@ -1,14 +1,15 @@
 use crate::color::{self, Rgba};
-use crate::resolve::resolve_css;
 use orisu_allocator::Allocator;
-use orisu_ast::{Node, to_css};
-use orisu_canonical::{CanonicalizeOptions, Canonicalizer};
-use orisu_compat_tailwind::Tailwind;
-use orisu_compiler::compiler::{self, CompileError, Compiler, Options, Stylesheet};
-use orisu_compiler::design_system::{Caches, DesignSystem, Session};
+use orisu_ast::{Node, to_css, walk};
+use orisu_candidate::attributify::Attributify;
+use orisu_canonical::CanonicalizeOptions;
+use orisu_compat_tailwind::OwnedCompiler;
+use orisu_compat_tailwind::resolve::resolve_css;
+use orisu_compat_tailwind::stylesheets::builtin;
+use orisu_compiler::compiler::{CompileError, Stylesheet, import_uri};
+use orisu_compiler::design_system::{DesignSystem, Session};
 use orisu_compiler::intellisense::{self, ClassEntry};
 use orisu_parser::segment::segment;
-use orisu_scanner::attributify::Attributify;
 use rustc_hash::FxHashMap;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
@@ -53,7 +54,7 @@ pub struct Project {
     pub dir: PathBuf,
     pub dependencies: Vec<PathBuf>,
     pub attributify: Option<Attributify>,
-    arena: Arena,
+    compiler: RefCell<OwnedCompiler>,
     variables: FxHashMap<String, String>,
     classes: OnceCell<Vec<ClassEntry>>,
     /// Indices into `classes`, bucketed by name length.
@@ -67,20 +68,6 @@ pub struct Project {
     canonical_ready: Cell<bool>,
     missing_theme_keys: RefCell<FxHashMap<String, bool>>,
 }
-
-struct State<'a> {
-    compiler: Compiler<'a>,
-    caches: RefCell<Caches<'a>>,
-    canonicalizer: RefCell<Option<Canonicalizer<'a>>>,
-}
-
-self_cell::self_cell!(
-    struct Arena {
-        owner: Allocator,
-        #[not_covariant]
-        dependent: State,
-    }
-);
 
 #[derive(Default)]
 struct Loaded {
@@ -104,26 +91,16 @@ impl Project {
             let base = path.parent().unwrap_or(Path::new("/")).to_string_lossy().into_owned();
             Ok(Stylesheet { path: path.to_string_lossy().into_owned(), base, content })
         };
-        let base = dir.to_string_lossy();
-        let arena = Arena::try_new(Allocator::new(), |alloc| {
-            let options = Options { base: &base, load_stylesheet: Some(Box::new(load)), extension: Some(&Tailwind), ..Options::default() };
-            compiler::compile(alloc.alloc_str(&css), alloc, options).map(|compiler| State {
-                compiler,
-                caches: RefCell::default(),
-                canonicalizer: RefCell::default(),
-            })
-        })?;
-        let attributify = arena.with_dependent(|_, state| {
-            state.compiler.design_system.attributify.map(|a| Attributify { prefix: a.prefix.to_owned(), prefixed_only: a.prefixed_only })
-        });
+        let compiler = OwnedCompiler::compile(&css, &dir.to_string_lossy(), None, Some(Box::new(load)))?;
+        let attributify = compiler.with(|compiler| compiler.design_system.attributify.clone());
         let Loaded { dependencies, variables } = std::mem::take(&mut *loaded.borrow_mut());
-        let loaded_bytes = arena.borrow_owner().allocated_bytes();
+        let loaded_bytes = compiler.allocated_bytes();
         Ok(Self {
             entry: entry.to_path_buf(),
             dir,
             dependencies,
             attributify,
-            arena,
+            compiler: RefCell::new(compiler),
             variables,
             classes: OnceCell::new(),
             by_length: OnceCell::new(),
@@ -140,15 +117,15 @@ impl Project {
 
     /// Whether the arena, which only grows as classes are looked up, has outgrown the freshly loaded one enough to reload.
     pub fn needs_reload(&self) -> bool {
-        self.arena.borrow_owner().allocated_bytes() > (self.loaded_bytes * 4).max(64 << 20)
+        self.compiler.borrow().allocated_bytes() > (self.loaded_bytes * 4).max(64 << 20)
     }
 
     fn with_ds<T>(&self, f: impl for<'a> FnOnce(&DesignSystem<'a>) -> T) -> T {
-        self.arena.with_dependent(|_, state| f(&state.compiler.design_system))
+        self.compiler.borrow().with(|compiler| f(&compiler.design_system))
     }
 
     fn with_session<T>(&self, f: impl for<'s, 'a> FnOnce(&mut Session<'s, 'a>) -> T) -> T {
-        self.arena.with_dependent(|alloc, state| f(&mut Session::new(&state.compiler.design_system, alloc, &mut state.caches.borrow_mut())))
+        self.compiler.borrow_mut().with_mut(|compiler| f(&mut compiler.session()))
     }
 
     pub fn classes(&self) -> &[ClassEntry] {
@@ -290,11 +267,7 @@ impl Project {
             return canonical.clone();
         }
         let options = CanonicalizeOptions { rem: Some(rem), ..CanonicalizeOptions::default() };
-        let canonical = self.arena.with_dependent(|alloc, state| {
-            let mut canonicalizer = state.canonicalizer.borrow_mut();
-            let canonicalizer = canonicalizer.get_or_insert_with(|| Canonicalizer::new(alloc));
-            canonicalizer.canonicalize(&state.compiler.design_system, &[class], &options).into_iter().next().filter(|c| c != class)
-        });
+        let canonical = self.compiler.borrow_mut().canonicalize(&[class], &options).into_iter().next().filter(|c| c != class);
         self.canonical.borrow_mut().insert(class.to_owned(), canonical.clone());
         self.canonical_ready.set(true);
         canonical
@@ -363,8 +336,7 @@ fn collect_variables(css: &str, out: &mut FxHashMap<String, String>) {
         if !matches!(before, Some(b'{' | b';')) {
             continue;
         }
-        let name_end =
-            bytes[at..].iter().position(|&b| !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).map_or(bytes.len(), |n| at + n);
+        let name_end = custom_property_end(bytes, at);
         let rest = &css[name_end..];
         let Some(value) = rest.trim_start().strip_prefix(':') else {
             continue;
@@ -389,12 +361,13 @@ fn collect_variables(css: &str, out: &mut FxHashMap<String, String>) {
     }
 }
 
-/// CSS files under `roots` that import Tailwind, skipping `node_modules` and ignored files, sorted by path within each root.
+/// CSS files under `roots` that import Tailwind, skipping dependency directories like `node_modules` and ignored files, sorted by path within each root.
 pub fn discover(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut entries = Vec::new();
     for root in roots {
         let found = Mutex::new(Vec::new());
-        let walker = orisu_ignore::WalkBuilder::new(root).filter_entry(|e| e.file_name() != "node_modules").build_parallel();
+        let walker =
+            orisu_ignore::WalkBuilder::new(root).filter_entry(|e| !orisu_scanner::is_ignored_content_dir(e.file_name())).build_parallel();
         walker.run(|| {
             Box::new(|entry| {
                 if let Ok(entry) = entry {
@@ -413,8 +386,27 @@ pub fn discover(roots: &[PathBuf]) -> Vec<PathBuf> {
     entries
 }
 
+/// Whether `css` imports one of Tailwind's built-in stylesheets or has `@tailwind utilities`.
 pub fn is_entry(css: &str) -> bool {
-    ["@import \"tailwindcss", "@import 'tailwindcss", "@import url(\"tailwindcss", "@tailwind utilities"]
-        .iter()
-        .any(|needle| css.contains(needle))
+    if memchr::memmem::find(css.as_bytes(), b"@import").is_none() && memchr::memmem::find(css.as_bytes(), b"@tailwind").is_none() {
+        return false;
+    }
+    let alloc = Allocator::new();
+    let Ok(ast) = orisu_parser::css::parse(css, &alloc) else {
+        return false;
+    };
+    let mut found = false;
+    walk(&ast, &mut |node| {
+        found |= match node {
+            Node::AtRule { name: "@import", params, .. } => import_uri(params, &alloc).is_some_and(|uri| builtin(uri).is_some()),
+            Node::AtRule { name: "@tailwind", params, .. } => params.split_whitespace().next() == Some("utilities"),
+            _ => false,
+        };
+        !found
+    });
+    found
+}
+
+pub(crate) fn custom_property_end(bytes: &[u8], at: usize) -> usize {
+    bytes[at..].iter().position(|&b| !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_')).map_or(bytes.len(), |n| at + n)
 }

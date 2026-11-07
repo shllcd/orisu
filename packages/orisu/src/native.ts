@@ -91,7 +91,7 @@ export interface MangleOptions {
   keep?: string[];
   /** Functions whose arguments are class lists, besides `cn`, `clsx` and the like. */
   classFunctions?: string[];
-  /** Attributes and properties whose values are class lists, besides `class` and `className`. */
+  /** Attributes and properties whose values are class lists, besides `class`, `className`, `*ClassName` and framework forms like `:class` and `[ngClass]`. */
   classAttributes?: string[];
   variantGroups?: boolean;
 }
@@ -215,8 +215,10 @@ interface Binding {
   ): NativeCompiler;
   expandVariantGroups(code: string): string | null;
   mangleModule(code: string, path: string, options?: MangleOptions | null): MangledModule;
+  fillPlaceholders(code: string, name: string): { code: string; map: string } | null;
   ManglePlan: { fromJson(json: string): ManglePlan };
-  check(entry: string, files: string[], fix?: boolean): string;
+  check(entry: string, files: string[], fix?: boolean): Diagnostic[];
+  resolveCss(id: string, base: string): string | null;
   lsp(): void;
 }
 
@@ -259,18 +261,16 @@ const cachingBuild = (compiler: NativeCompiler): Compiler => {
 
 export const Scanner = binding.Scanner;
 /** Lints `files` against the design system of `entry`; with `fix`, writes the fixes back. */
-export const check = (entry: string, files: string[], fix = false): Diagnostic[] =>
-  binding
-    .check(entry, files, fix)
-    .split("\n")
-    .filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as Diagnostic);
+export const check = binding.check;
+export const resolveCss = binding.resolveCss;
 /** Serves the language server over stdio until the client exits. */
 export const lsp = binding.lsp;
 /** Expands `hover:(a b)` variant groups inside the string literals of `code`; `null` when none were found. */
 export const expandVariantGroups = binding.expandVariantGroups;
 /** Rewrites the class positions of a module into placeholders that {@link ManglePlan.fill} resolves. */
 export const mangleModule = binding.mangleModule;
+/** Turns the placeholders of {@link mangleModule} back into their classes, for a build without a plan. */
+export const fillPlaceholders = binding.fillPlaceholders;
 /** Reads a plan written by {@link ManglePlan.toJson}. */
 export const loadManglePlan = (json: string): ManglePlan => binding.ManglePlan.fromJson(json);
 /** Compiles synchronously; `@import` needs {@link compileAsync}. */

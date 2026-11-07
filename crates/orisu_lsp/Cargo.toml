@@ -12,17 +12,18 @@ path = "src/main.rs"
 
 [dependencies]
 orisu_allocator.workspace = true
+orisu_analyze.workspace = true
 orisu_ast.workspace = true
 orisu_parser.workspace = true
 orisu_compiler.workspace = true
 orisu_compat_tailwind.workspace = true
 orisu_canonical.workspace = true
+orisu_candidate.workspace = true
 orisu_scanner.workspace = true
 orisu_ignore.workspace = true
 orisu_diagnostics.workspace = true
 memchr.workspace = true
 rustc-hash.workspace = true
-self_cell.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 crossbeam-channel = "0.5"

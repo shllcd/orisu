@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { formatOptions } from "./args.ts";
 import { parseArgs } from "node:util";
 import { Scanner } from "./index.ts";
 
@@ -10,10 +11,7 @@ const OPTIONS = {
 
 const help = () => {
   const out = ["Usage:", "  orisu manifest [dir] [-o orisu.json]", "", "Options:"];
-  for (const [name, option] of Object.entries(OPTIONS)) {
-    const flag = ("short" in option ? `-${option.short}, ` : "    ") + `--${name}`;
-    out.push(`  ${flag.padEnd(16)}${option.description}`);
-  }
+  out.push(...formatOptions(OPTIONS));
   out.push("", 'Lists every candidate of the package in `dir`. Point `"orisu": { "manifest": "./orisu.json" }` in its');
   out.push("package.json at the file so that apps read it instead of scanning the package.");
   process.stderr.write(out.join("\n") + "\n");

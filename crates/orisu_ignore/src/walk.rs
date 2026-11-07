@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     ffi::OsStr,
     fs::{self, FileType, Metadata},
     io,
@@ -15,11 +14,9 @@ use {
 };
 
 use crate::{
-    Error, PartialErrorBuilder,
+    Error,
     dir::{Ignore, IgnoreBuilder},
-    gitignore::{Gitignore, GitignoreBuilder},
-    overrides::Override,
-    types::Types,
+    gitignore::Gitignore,
 };
 
 /// A directory entry with a possible error attached.
@@ -402,12 +399,7 @@ pub struct WalkBuilder {
     ig_builder: IgnoreBuilder,
     max_depth: Option<usize>,
     min_depth: Option<usize>,
-    max_filesize: Option<u64>,
     follow_links: bool,
-    same_file_system: bool,
-    sorter: Option<Sorter>,
-    threads: usize,
-    skip: Option<Arc<Handle>>,
     filter: Option<Filter>,
     /// The directory that gitignores should be interpreted relative to.
     ///
@@ -423,12 +415,6 @@ pub struct WalkBuilder {
 }
 
 #[derive(Clone)]
-enum Sorter {
-    ByName(Arc<dyn Fn(&OsStr, &OsStr) -> Ordering + Send + Sync + 'static>),
-    ByPath(Arc<dyn Fn(&Path, &Path) -> Ordering + Send + Sync + 'static>),
-}
-
-#[derive(Clone)]
 struct Filter(Arc<dyn Fn(&DirEntry) -> bool + Send + Sync + 'static>);
 
 impl std::fmt::Debug for WalkBuilder {
@@ -438,12 +424,7 @@ impl std::fmt::Debug for WalkBuilder {
             .field("ig_builder", &self.ig_builder)
             .field("max_depth", &self.max_depth)
             .field("min_depth", &self.min_depth)
-            .field("max_filesize", &self.max_filesize)
             .field("follow_links", &self.follow_links)
-            .field("same_file_system", &self.same_file_system)
-            .field("sorter", &"<...>")
-            .field("threads", &self.threads)
-            .field("skip", &self.skip)
             .field("filter", &"<...>")
             .field("global_gitignores_relative_to", &self.global_gitignores_relative_to)
             .finish()
@@ -463,12 +444,7 @@ impl WalkBuilder {
             ig_builder: IgnoreBuilder::new(),
             max_depth: None,
             min_depth: None,
-            max_filesize: None,
             follow_links: false,
-            same_file_system: false,
-            sorter: None,
-            threads: 0,
-            skip: None,
             filter: None,
             global_gitignores_relative_to: OnceLock::new(),
         }
@@ -479,7 +455,6 @@ impl WalkBuilder {
         let follow_links = self.follow_links;
         let max_depth = self.max_depth;
         let min_depth = self.min_depth;
-        let sorter = self.sorter.clone();
         let its = self
             .paths
             .iter()
@@ -489,22 +464,11 @@ impl WalkBuilder {
                 } else {
                     let mut wd = WalkDir::new(p);
                     wd = wd.follow_links(follow_links || p.is_file());
-                    wd = wd.same_file_system(self.same_file_system);
                     if let Some(max_depth) = max_depth {
                         wd = wd.max_depth(max_depth);
                     }
                     if let Some(min_depth) = min_depth {
                         wd = wd.min_depth(min_depth);
-                    }
-                    if let Some(ref sorter) = sorter {
-                        match sorter.clone() {
-                            Sorter::ByName(cmp) => {
-                                wd = wd.sort_by(move |a, b| cmp(a.file_name(), b.file_name()));
-                            }
-                            Sorter::ByPath(cmp) => {
-                                wd = wd.sort_by(move |a, b| cmp(a.path(), b.path()));
-                            }
-                        }
                     }
                     (p.to_path_buf(), Some(WalkEventIter::from(wd)))
                 }
@@ -515,15 +479,7 @@ impl WalkBuilder {
             .get_or_set_current_dir()
             .map(|cwd| self.ig_builder.build_with_cwd(Some(cwd.to_path_buf())))
             .unwrap_or_else(|| self.ig_builder.build());
-        Walk {
-            its,
-            it: None,
-            ig_root: ig_root.clone(),
-            ig: ig_root.clone(),
-            max_filesize: self.max_filesize,
-            skip: self.skip.clone(),
-            filter: self.filter.clone(),
-        }
+        Walk { its, it: None, ig_root: ig_root.clone(), ig: ig_root.clone(), filter: self.filter.clone() }
     }
 
     /// Build a new `WalkParallel` iterator.
@@ -541,11 +497,7 @@ impl WalkBuilder {
             ig_root,
             max_depth: self.max_depth,
             min_depth: self.min_depth,
-            max_filesize: self.max_filesize,
             follow_links: self.follow_links,
-            same_file_system: self.same_file_system,
-            threads: self.threads,
-            skip: self.skip.clone(),
             filter: self.filter.clone(),
         }
     }
@@ -560,77 +512,10 @@ impl WalkBuilder {
         self
     }
 
-    /// The maximum depth to recurse.
-    ///
-    /// The default, `None`, imposes no depth restriction.
-    pub fn max_depth(&mut self, depth: Option<usize>) -> &mut WalkBuilder {
-        self.max_depth = depth;
-        if self.min_depth.is_some() && self.max_depth.is_some() && self.max_depth < self.min_depth {
-            self.max_depth = self.min_depth;
-        }
-        self
-    }
-
-    /// The minimum depth to recurse.
-    ///
-    /// The default, `None`, imposes no minimum depth restriction.
-    pub fn min_depth(&mut self, depth: Option<usize>) -> &mut WalkBuilder {
-        self.min_depth = depth;
-        if self.max_depth.is_some() && self.min_depth.is_some() && self.min_depth > self.max_depth {
-            self.min_depth = self.max_depth;
-        }
-        self
-    }
-
     /// Whether to follow symbolic links or not.
     pub fn follow_links(&mut self, yes: bool) -> &mut WalkBuilder {
         self.follow_links = yes;
         self
-    }
-
-    /// Whether to ignore files above the specified limit.
-    pub fn max_filesize(&mut self, filesize: Option<u64>) -> &mut WalkBuilder {
-        self.max_filesize = filesize;
-        self
-    }
-
-    /// The number of threads to use for traversal.
-    ///
-    /// Note that this only has an effect when using `build_parallel`.
-    ///
-    /// The default setting is `0`, which chooses the number of threads
-    /// automatically using heuristics.
-    pub fn threads(&mut self, n: usize) -> &mut WalkBuilder {
-        self.threads = n;
-        self
-    }
-
-    /// Add a global ignore file to the matcher.
-    ///
-    /// This has lower precedence than all other sources of ignore rules.
-    ///
-    /// # Errors
-    ///
-    /// If there was a problem adding the ignore file, then an error is
-    /// returned. Note that the error may indicate *partial* failure. For
-    /// example, if an ignore file contains an invalid glob, all other globs
-    /// are still applied.
-    ///
-    /// An error will also occur if this walker could not get the current
-    /// working directory (and `WalkBuilder::current_dir` isn't set).
-    pub fn add_ignore<P: AsRef<Path>>(&mut self, path: P) -> Option<Error> {
-        let mut builder = GitignoreBuilder::new("");
-        let mut errs = PartialErrorBuilder::default();
-        errs.maybe_push(builder.add(path));
-        match builder.build() {
-            Ok(gi) => {
-                self.ig_builder.add_ignore(gi);
-            }
-            Err(err) => {
-                errs.push(err);
-            }
-        }
-        errs.into_error_option()
     }
 
     /// CHANGED: Add a Gitignore to the builder.
@@ -638,82 +523,11 @@ impl WalkBuilder {
         self.ig_builder.add_ignore(gi);
     }
 
-    /// Add a custom ignore file name
-    ///
-    /// These ignore files have higher precedence than all other ignore files.
-    ///
-    /// When specifying multiple names, earlier names have lower precedence than
-    /// later names.
-    pub fn add_custom_ignore_filename<S: AsRef<OsStr>>(&mut self, file_name: S) -> &mut WalkBuilder {
-        self.ig_builder.add_custom_ignore_filename(file_name);
-        self
-    }
-
-    /// Add an override matcher.
-    ///
-    /// By default, no override matcher is used.
-    ///
-    /// This overrides any previous setting.
-    pub fn overrides(&mut self, overrides: Override) -> &mut WalkBuilder {
-        self.ig_builder.overrides(overrides);
-        self
-    }
-
-    /// Add a file type matcher.
-    ///
-    /// By default, no file type matcher is used.
-    ///
-    /// This overrides any previous setting.
-    pub fn types(&mut self, types: Types) -> &mut WalkBuilder {
-        self.ig_builder.types(types);
-        self
-    }
-
-    /// Enables all the standard ignore filters.
-    ///
-    /// This toggles, as a group, all the filters that are enabled by default:
-    ///
-    /// - [hidden()](#method.hidden)
-    /// - [parents()](#method.parents)
-    /// - [ignore()](#method.ignore)
-    /// - [git_ignore()](#method.git_ignore)
-    /// - [git_global()](#method.git_global)
-    /// - [git_exclude()](#method.git_exclude)
-    ///
-    /// They may still be toggled individually after calling this function.
-    ///
-    /// This is (by definition) enabled by default.
-    pub fn standard_filters(&mut self, yes: bool) -> &mut WalkBuilder {
-        self.hidden(yes).parents(yes).ignore(yes).git_ignore(yes).git_global(yes).git_exclude(yes)
-    }
-
     /// Enables ignoring hidden files.
     ///
     /// This is enabled by default.
     pub fn hidden(&mut self, yes: bool) -> &mut WalkBuilder {
         self.ig_builder.hidden(yes);
-        self
-    }
-
-    /// Enables reading ignore files from parent directories.
-    ///
-    /// If this is enabled, then .gitignore files in parent directories of each
-    /// file path given are respected. Otherwise, they are ignored.
-    ///
-    /// This is enabled by default.
-    pub fn parents(&mut self, yes: bool) -> &mut WalkBuilder {
-        self.ig_builder.parents(yes);
-        self
-    }
-
-    /// Enables reading `.ignore` files.
-    ///
-    /// `.ignore` files have the same semantics as `gitignore` files and are
-    /// supported by search tools such as ripgrep and The Silver Searcher.
-    ///
-    /// This is enabled by default.
-    pub fn ignore(&mut self, yes: bool) -> &mut WalkBuilder {
-        self.ig_builder.ignore(yes);
         self
     }
 
@@ -731,28 +545,6 @@ impl WalkBuilder {
         self
     }
 
-    /// Enables reading `.gitignore` files.
-    ///
-    /// `.gitignore` files have match semantics as described in the `gitignore`
-    /// man page.
-    ///
-    /// This is enabled by default.
-    pub fn git_ignore(&mut self, yes: bool) -> &mut WalkBuilder {
-        self.ig_builder.git_ignore(yes);
-        self
-    }
-
-    /// Enables reading `.git/info/exclude` files.
-    ///
-    /// `.git/info/exclude` files have match semantics as described in the
-    /// `gitignore` man page.
-    ///
-    /// This is enabled by default.
-    pub fn git_exclude(&mut self, yes: bool) -> &mut WalkBuilder {
-        self.ig_builder.git_exclude(yes);
-        self
-    }
-
     /// Whether a git repository is required to apply git-related ignore
     /// rules (global rules, .gitignore and local exclude rules).
     ///
@@ -764,88 +556,6 @@ impl WalkBuilder {
     /// which is different from the git behavior.
     pub fn require_git(&mut self, yes: bool) -> &mut WalkBuilder {
         self.ig_builder.require_git(yes);
-        self
-    }
-
-    /// Process ignore files case insensitively
-    ///
-    /// This is disabled by default.
-    pub fn ignore_case_insensitive(&mut self, yes: bool) -> &mut WalkBuilder {
-        self.ig_builder.ignore_case_insensitive(yes);
-        self
-    }
-
-    /// Set a function for sorting directory entries by their path.
-    ///
-    /// If a compare function is set, the resulting iterator will return all
-    /// paths in sorted order. The compare function will be called to compare
-    /// entries from the same directory.
-    ///
-    /// This is like `sort_by_file_name`, except the comparator accepts
-    /// a `&Path` instead of the base file name, which permits it to sort by
-    /// more criteria.
-    ///
-    /// This method will override any previous sorter set by this method or
-    /// by `sort_by_file_name`.
-    ///
-    /// Note that this is not used in the parallel iterator.
-    pub fn sort_by_file_path<F>(&mut self, cmp: F) -> &mut WalkBuilder
-    where
-        F: Fn(&Path, &Path) -> Ordering + Send + Sync + 'static,
-    {
-        self.sorter = Some(Sorter::ByPath(Arc::new(cmp)));
-        self
-    }
-
-    /// Set a function for sorting directory entries by file name.
-    ///
-    /// If a compare function is set, the resulting iterator will return all
-    /// paths in sorted order. The compare function will be called to compare
-    /// names from entries from the same directory using only the name of the
-    /// entry.
-    ///
-    /// This method will override any previous sorter set by this method or
-    /// by `sort_by_file_path`.
-    ///
-    /// Note that this is not used in the parallel iterator.
-    pub fn sort_by_file_name<F>(&mut self, cmp: F) -> &mut WalkBuilder
-    where
-        F: Fn(&OsStr, &OsStr) -> Ordering + Send + Sync + 'static,
-    {
-        self.sorter = Some(Sorter::ByName(Arc::new(cmp)));
-        self
-    }
-
-    /// Do not cross file system boundaries.
-    ///
-    /// When this option is enabled, directory traversal will not descend into
-    /// directories that are on a different file system from the root path.
-    ///
-    /// Currently, this option is only supported on Unix and Windows. If this
-    /// option is used on an unsupported platform, then directory traversal
-    /// will immediately return an error and will not yield any entries.
-    pub fn same_file_system(&mut self, yes: bool) -> &mut WalkBuilder {
-        self.same_file_system = yes;
-        self
-    }
-
-    /// Do not yield directory entries that are believed to correspond to
-    /// stdout.
-    ///
-    /// This is useful when a command is invoked via shell redirection to a
-    /// file that is also being read. For example, `grep -r foo ./ > results`
-    /// might end up trying to search `results` even though it is also writing
-    /// to it, which could cause an unbounded feedback loop. Setting this
-    /// option prevents this from happening by skipping over the `results`
-    /// file.
-    ///
-    /// This is disabled by default.
-    pub fn skip_stdout(&mut self, yes: bool) -> &mut WalkBuilder {
-        if yes {
-            self.skip = stdout_handle().map(Arc::new);
-        } else {
-            self.skip = None;
-        }
         self
     }
 
@@ -867,23 +577,6 @@ impl WalkBuilder {
         P: Fn(&DirEntry) -> bool + Send + Sync + 'static,
     {
         self.filter = Some(Filter(Arc::new(filter)));
-        self
-    }
-
-    /// Set the current working directory used for matching global gitignores.
-    ///
-    /// If this is not set, then this walker will attempt to discover the
-    /// correct path from the environment's current working directory. If
-    /// that fails, then global gitignore files will be ignored.
-    ///
-    /// Global gitignore files come from things like a user's git configuration
-    /// or from gitignore files added via [`WalkBuilder::add_ignore`].
-    pub fn current_dir(&mut self, cwd: impl Into<PathBuf>) -> &mut WalkBuilder {
-        let cwd = cwd.into();
-        self.ig_builder.current_dir(cwd.clone());
-        if let Err(cwd) = self.global_gitignores_relative_to.set(Ok(cwd)) {
-            *self.global_gitignores_relative_to.get_mut().unwrap() = cwd;
-        }
         self
     }
 
@@ -924,8 +617,6 @@ pub struct Walk {
     it: Option<WalkEventIter>,
     ig_root: Ignore,
     ig: Ignore,
-    max_filesize: Option<u64>,
-    skip: Option<Arc<Handle>>,
     filter: Option<Filter>,
 }
 
@@ -945,14 +636,6 @@ impl Walk {
         }
         if should_skip_entry(&self.ig, ent) {
             return Ok(true);
-        }
-        if let Some(ref stdout) = self.skip {
-            if path_equals(ent, stdout)? {
-                return Ok(true);
-            }
-        }
-        if self.max_filesize.is_some() && !ent.is_dir() {
-            return Ok(skip_filesize(self.max_filesize.unwrap(), ent.path(), &ent.metadata().ok()));
         }
         if let Some(Filter(filter)) = &self.filter {
             if !filter(ent) {
@@ -1178,13 +861,9 @@ impl<'s> ParallelVisitor for FnVisitorImp<'s> {
 pub struct WalkParallel {
     paths: std::vec::IntoIter<PathBuf>,
     ig_root: Ignore,
-    max_filesize: Option<u64>,
     max_depth: Option<usize>,
     min_depth: Option<usize>,
     follow_links: bool,
-    same_file_system: bool,
-    threads: usize,
-    skip: Option<Arc<Handle>>,
     filter: Option<Filter>,
 }
 
@@ -1217,32 +896,18 @@ impl WalkParallel {
     /// synchronization. Then, once traversal is complete, all of the results
     /// can be merged together into a single data structure.
     pub fn visit(mut self, builder: &mut dyn ParallelVisitorBuilder<'_>) {
-        let threads = self.threads();
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(12);
         let mut stack = vec![];
         {
             let mut visitor = builder.build();
             let mut paths = Vec::new().into_iter();
             std::mem::swap(&mut paths, &mut self.paths);
             for path in paths {
-                let (dent, root_device) = if path == Path::new("-") {
-                    (DirEntry::new_stdin(), None)
+                let dent = if path == Path::new("-") {
+                    DirEntry::new_stdin()
                 } else {
-                    let root_device = if !self.same_file_system {
-                        None
-                    } else {
-                        match device_num(&path) {
-                            Ok(root_device) => Some(root_device),
-                            Err(err) => {
-                                let err = Error::Io(err).with_path(path);
-                                if visitor.visit(Err(err)).is_quit() {
-                                    return;
-                                }
-                                continue;
-                            }
-                        }
-                    };
                     match DirEntryRaw::from_path(0, path, false) {
-                        Ok(dent) => (DirEntry::new_raw(dent, None), root_device),
+                        Ok(dent) => DirEntry::new_raw(dent, None),
                         Err(err) => {
                             if visitor.visit(Err(err)).is_quit() {
                                 return;
@@ -1251,7 +916,7 @@ impl WalkParallel {
                         }
                     }
                 };
-                stack.push(Message::Work(Work { dent, ignore: self.ig_root.clone(), root_device }));
+                stack.push(Message::Work(Work { dent, ignore: self.ig_root.clone() }));
             }
             if stack.is_empty() {
                 return;
@@ -1270,9 +935,7 @@ impl WalkParallel {
                     active_workers: active_workers.clone(),
                     max_depth: self.max_depth,
                     min_depth: self.min_depth,
-                    max_filesize: self.max_filesize,
                     follow_links: self.follow_links,
-                    skip: self.skip.clone(),
                     filter: self.filter.clone(),
                 })
                 .map(|worker| s.spawn(|| worker.run()))
@@ -1281,10 +944,6 @@ impl WalkParallel {
                 handle.join().unwrap();
             }
         });
-    }
-
-    fn threads(&self) -> usize {
-        if self.threads == 0 { std::thread::available_parallelism().map_or(1, |n| n.get()).min(12) } else { self.threads }
     }
 }
 
@@ -1307,9 +966,6 @@ struct Work {
     dent: DirEntry,
     /// Any ignore matchers that have been built for this directory's parents.
     ignore: Ignore,
-    /// The root device number. When present, only files with the same device
-    /// number should be considered.
-    root_device: Option<u64>,
 }
 
 impl Work {
@@ -1428,13 +1084,9 @@ struct Worker<'s> {
     min_depth: Option<usize>,
     /// The maximum size a searched file can be (in bytes). If a file exceeds
     /// this size it will be skipped.
-    max_filesize: Option<u64>,
     /// Whether to follow symbolic links or not. When this is enabled, loop
     /// detection is performed.
     follow_links: bool,
-    /// A file handle to skip, currently is either `None` or stdout, if it's
-    /// a file and it has been requested to skip files identical to stdout.
-    skip: Option<Arc<Handle>>,
     /// A predicate applied to dir entries. If true, the entry and all
     /// children will be skipped.
     filter: Option<Filter>,
@@ -1466,22 +1118,6 @@ impl<'s> Worker<'s> {
             }
         }
 
-        let descend = if let Some(root_device) = work.root_device {
-            match is_same_file_system(root_device, work.dent.path()) {
-                Ok(true) => true,
-                Ok(false) => false,
-                Err(err) => {
-                    let state = self.visitor.visit(Err(err));
-                    if state.is_quit() {
-                        return state;
-                    }
-                    false
-                }
-            }
-        } else {
-            true
-        };
-
         let readdir = work.read_dir();
         let depth = work.dent.depth();
         if should_visit {
@@ -1490,10 +1126,6 @@ impl<'s> Worker<'s> {
                 return state;
             }
         }
-        if !descend {
-            return WalkState::Skip;
-        }
-
         let readdir = match readdir {
             Ok(readdir) => readdir,
             Err(err) => {
@@ -1505,7 +1137,7 @@ impl<'s> Worker<'s> {
             return WalkState::Skip;
         }
         for result in readdir {
-            let state = self.generate_work(&work.ignore, depth + 1, work.root_device, result);
+            let state = self.generate_work(&work.ignore, depth + 1, result);
             if state.is_quit() {
                 return state;
             }
@@ -1526,7 +1158,7 @@ impl<'s> Worker<'s> {
     /// `ig` is the `Ignore` matcher for the parent directory. `depth` should
     /// be the depth of this entry. `result` should be the item yielded by
     /// a directory iterator.
-    fn generate_work(&mut self, ig: &Ignore, depth: usize, root_device: Option<u64>, result: Result<fs::DirEntry, io::Error>) -> WalkState {
+    fn generate_work(&mut self, ig: &Ignore, depth: usize, result: Result<fs::DirEntry, io::Error>) -> WalkState {
         let fs_dent = match result {
             Ok(fs_dent) => fs_dent,
             Err(err) => {
@@ -1557,23 +1189,9 @@ impl<'s> Worker<'s> {
         if should_skip_entry(ig, &dent) {
             return WalkState::Continue;
         }
-        if let Some(ref stdout) = self.skip {
-            let is_stdout = match path_equals(&dent, stdout) {
-                Ok(is_stdout) => is_stdout,
-                Err(err) => return self.visitor.visit(Err(err)),
-            };
-            if is_stdout {
-                return WalkState::Continue;
-            }
-        }
-        let should_skip_filesize = if self.max_filesize.is_some() && !dent.is_dir() {
-            skip_filesize(self.max_filesize.unwrap(), dent.path(), &dent.metadata().ok())
-        } else {
-            false
-        };
         let should_skip_filtered = if let Some(Filter(predicate)) = &self.filter { !predicate(&dent) } else { false };
-        if !should_skip_filesize && !should_skip_filtered {
-            self.send(Work { dent, ignore: ig.clone(), root_device });
+        if !should_skip_filtered {
+            self.send(Work { dent, ignore: ig.clone() });
         }
         WalkState::Continue
     }
@@ -1662,24 +1280,6 @@ fn check_symlink_loop(ig_parent: &Ignore, child_path: &Path, child_depth: usize)
     Ok(())
 }
 
-fn skip_filesize(max_filesize: u64, path: &Path, ent: &Option<Metadata>) -> bool {
-    let filesize = match *ent {
-        Some(ref md) => Some(md.len()),
-        None => None,
-    };
-
-    if let Some(fs) = filesize {
-        if fs > max_filesize {
-            log::debug!("ignoring {}: {} bytes", path.display(), fs);
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    }
-}
-
 fn should_skip_entry(ig: &Ignore, dent: &DirEntry) -> bool {
     let m = ig.matched_dir_entry(dent);
     if m.is_ignore() {
@@ -1691,48 +1291,6 @@ fn should_skip_entry(ig: &Ignore, dent: &DirEntry) -> bool {
     } else {
         false
     }
-}
-
-/// Returns a handle to stdout for filtering search.
-///
-/// A handle is returned if and only if stdout is being redirected to a file.
-/// The handle returned corresponds to that file.
-///
-/// This can be used to ensure that we do not attempt to search a file that we
-/// may also be writing to.
-fn stdout_handle() -> Option<Handle> {
-    let h = match Handle::stdout() {
-        Err(_) => return None,
-        Ok(h) => h,
-    };
-    let md = match h.as_file().metadata() {
-        Err(_) => return None,
-        Ok(md) => md,
-    };
-    if !md.is_file() {
-        return None;
-    }
-    Some(h)
-}
-
-/// Returns true if and only if the given directory entry is believed to be
-/// equivalent to the given handle. If there was a problem querying the path
-/// for information to determine equality, then that error is returned.
-fn path_equals(dent: &DirEntry, handle: &Handle) -> Result<bool, Error> {
-    #[cfg(unix)]
-    fn never_equal(dent: &DirEntry, handle: &Handle) -> bool {
-        dent.ino() != Some(handle.ino())
-    }
-
-    #[cfg(not(unix))]
-    fn never_equal(_: &DirEntry, _: &Handle) -> bool {
-        false
-    }
-
-    if dent.is_stdin() || never_equal(dent, handle) {
-        return Ok(false);
-    }
-    Handle::from_path(dent.path()).map(|h| &h == handle).map_err(|err| Error::Io(err).with_path(dent.path()))
 }
 
 /// Returns true if the given walkdir entry corresponds to a directory.
@@ -1751,31 +1309,4 @@ fn walkdir_is_dir(dent: &walkdir::DirEntry) -> bool {
         return false;
     }
     dent.path().metadata().ok().map_or(false, |md| md.file_type().is_dir())
-}
-
-/// Returns true if and only if the given path is on the same device as the
-/// given root device.
-fn is_same_file_system(root_device: u64, path: &Path) -> Result<bool, Error> {
-    let dent_device = device_num(path).map_err(|err| Error::Io(err).with_path(path))?;
-    Ok(root_device == dent_device)
-}
-
-#[cfg(unix)]
-fn device_num<P: AsRef<Path>>(path: P) -> io::Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-
-    path.as_ref().metadata().map(|md| md.dev())
-}
-
-#[cfg(windows)]
-fn device_num<P: AsRef<Path>>(path: P) -> io::Result<u64> {
-    use winapi_util::{Handle, file};
-
-    let h = Handle::from_path_any(path)?;
-    file::information(h).map(|info| info.volume_serial_number())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn device_num<P: AsRef<Path>>(_: P) -> io::Result<u64> {
-    Err(io::Error::new(io::ErrorKind::Other, "walkdir: same_file_system option not supported on this platform"))
 }

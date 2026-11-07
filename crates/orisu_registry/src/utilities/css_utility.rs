@@ -1,7 +1,7 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use super::{Compile, Cx, DEFAULT_SPACING_SUGGESTIONS, Suggest, Utilities, Utility, UtilityKind};
+use super::{Compile, CssUtilityId, Cx, DEFAULT_SPACING_SUGGESTIONS, Suggest, Utilities, Utility, UtilityKind};
 use indexmap::IndexSet;
 use orisu_allocator::{AllocExt, Allocator, Vec};
 use orisu_ast::{Node, Nodes, clone_in};
@@ -30,37 +30,16 @@ impl<'a> CssUtility<'a> {
         is_valid_static_utility_name(name).then_some(Self { name, functional: false, body })
     }
 
-    /// Registers the utility; its body stays reachable through [`Utilities::body_mut`] at the returned index.
-    pub fn register(self, utilities: &mut Utilities<'a>, alloc: &'a Allocator) -> usize {
+    pub fn register(self, utilities: &mut Utilities<'a>, alloc: &'a Allocator) -> CssUtilityId<'a> {
         let Self { name, functional, mut body } = self;
         if !functional {
-            return utilities.add(
-                name,
-                Utility {
-                    kind: UtilityKind::Static,
-                    compile: Compile::Css(body),
-                    types: None,
-                    functional: None,
-                    negative: false,
-                    declarations: None,
-                },
-            );
+            return CssUtilityId { name, index: utilities.add(name, Utility { kind: UtilityKind::Static, compile: Compile::Css(body) }) };
         }
 
         let mut storage = [Storage::default(), Storage::default()];
         normalize(&mut body, &mut storage, alloc);
         let template = CssTemplate::new(body, alloc);
-        let index = utilities.add(
-            name,
-            Utility {
-                kind: UtilityKind::Functional,
-                compile: Compile::CssFunctional(template),
-                types: None,
-                functional: None,
-                negative: false,
-                declarations: None,
-            },
-        );
+        let index = utilities.add(name, Utility { kind: UtilityKind::Functional, compile: Compile::CssFunctional(template) });
 
         let [value_storage, modifier_storage] = storage;
         let value_keys = arena_keys(&value_storage.theme_keys, alloc);
@@ -68,7 +47,7 @@ impl<'a> CssUtility<'a> {
         let values = value_storage.suggestions(alloc);
         let modifiers = modifier_storage.suggestions(alloc);
         utilities.suggest(name, [Suggest::values(values).modifiers(modifiers).keys(value_keys).modifier_keys(modifier_keys)]);
-        index
+        CssUtilityId { name, index }
     }
 }
 
@@ -459,7 +438,7 @@ fn resolve_value_function<'a>(cx: &Cx<'a, '_>, input: &Input<'a>, args: &[ValueN
                 }
                 let root = keys.remove(0);
                 let last = keys[keys.len() - 1];
-                if let Some((_, options)) = cx.theme.resolve_with(named, &[root], &keys, cx.options)
+                if let Some((_, options)) = cx.theme.resolve_with(named, &[root], &keys, cx.inline)
                     && let Some(&(_, resolved)) = options.iter().find(|(k, _)| *k == last)
                     && !resolved.is_empty()
                 {

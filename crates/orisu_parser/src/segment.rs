@@ -1,6 +1,7 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
+use orisu_ast::bytes::string_end;
 use smallvec::SmallVec;
 
 pub type Segments<'a> = SmallVec<[&'a str; 8]>;
@@ -22,20 +23,7 @@ pub fn segment(input: &str, separator: u8) -> Segments<'_> {
         }
         match ch {
             b'\\' => idx += 1,
-            b'\'' | b'"' => {
-                idx += 1;
-                while idx < len {
-                    let next = bytes[idx];
-                    if next == b'\\' {
-                        idx += 2;
-                        continue;
-                    }
-                    if next == ch {
-                        break;
-                    }
-                    idx += 1;
-                }
-            }
+            b'\'' | b'"' => idx = string_end(bytes, idx).unwrap_or(len),
             b'(' => stack.push(b')'),
             b'[' => stack.push(b']'),
             b'{' => stack.push(b'}'),
@@ -59,20 +47,7 @@ pub fn is_valid_arbitrary(input: &str) -> bool {
         let ch = bytes[idx];
         match ch {
             b'\\' => idx += 1,
-            b'\'' | b'"' => {
-                idx += 1;
-                while idx < len {
-                    let next = bytes[idx];
-                    if next == b'\\' {
-                        idx += 2;
-                        continue;
-                    }
-                    if next == ch {
-                        break;
-                    }
-                    idx += 1;
-                }
-            }
+            b'\'' | b'"' => idx = string_end(bytes, idx).unwrap_or(len),
             b'(' => stack.push(b')'),
             b'[' => stack.push(b']'),
             b')' | b']' | b'}' => {

@@ -4,6 +4,7 @@ mod bench_tailwind;
 mod check_core;
 mod codegen;
 mod conformance;
+mod harness;
 
 const USAGE: &str = "usage:
   cargo xtask codegen [--check]

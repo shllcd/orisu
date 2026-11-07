@@ -1,29 +1,38 @@
-pub mod css;
+mod css;
 pub mod names;
-pub mod rewrite;
+mod rewrite;
 
 use indexmap::IndexMap;
-use orisu_analyze::Fragment;
-use orisu_diagnostics::{Code, Report, Span};
+use orisu_analyze::{Fragment, Token};
+use orisu_diagnostics::Code;
 use orisu_merge::{MergeTable, Merger};
 use rayon::prelude::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 const JS_EXTENSIONS: &[&str] = &["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
 
 #[derive(Clone, Debug, Default)]
 pub struct Options {
-    /// Starts every short name.
-    pub prefix: String,
-    /// Classes that keep their names.
-    pub keep: Vec<String>,
-    pub positions: orisu_analyze::Options,
-    /// Whether variant groups are expanded in source strings before the build sees them.
-    pub variant_groups: bool,
+    prefix: String,
+    keep: Vec<String>,
+    positions: orisu_analyze::Options,
+    variant_groups: bool,
 }
 
-/// What the plan is computed from.
+impl Options {
+    /// `prefix` starts every short name and must keep each one a CSS identifier without escapes; `variant_groups` tells
+    /// whether variant groups in source strings are expanded before the build sees them.
+    pub fn new(prefix: String, keep: Vec<String>, positions: orisu_analyze::Options, variant_groups: bool) -> Result<Self, String> {
+        if !names::valid_name_prefix(&prefix) {
+            return Err(format!("`mangle.prefix` must be a CSS identifier start of letters, digits, `_` and `-`, got `{prefix}`"));
+        }
+        Ok(Self { prefix, keep, positions, variant_groups })
+    }
+}
+
 pub struct Input<'i> {
     /// Every scanned file.
     pub files: &'i [PathBuf],
@@ -62,12 +71,39 @@ pub struct NameTable {
 }
 
 pub struct Plan {
-    /// Renamed classes and their short names.
-    pub names: IndexMap<String, String, FxBuildHasher>,
-    pub shorts: FxHashSet<String>,
-    /// Shapes of the classes that keep their names.
-    pub table: MergeTable,
-    pub name_table: NameTable,
+    names: IndexMap<String, String, FxBuildHasher>,
+    shorts: FxHashSet<String>,
+    table: MergeTable,
+    name_table: NameTable,
+}
+
+/// The classes of a JavaScript module, read from its source after its variant groups are expanded when asked.
+struct Analyzed {
+    /// The source the tokens point into when expanding changed it.
+    expanded: Option<String>,
+    tokens: Vec<Token>,
+    pinned: FxHashSet<String>,
+    fragments: Vec<Fragment>,
+    name_merger: Option<String>,
+}
+
+impl Analyzed {
+    fn source<'s>(&'s self, original: &'s str) -> &'s str {
+        self.expanded.as_deref().unwrap_or(original)
+    }
+}
+
+/// The class positions of a JavaScript module, or every candidate in it pinned when it does not parse.
+fn analyze_js(source: &str, path: &Path, options: &Options) -> Result<Analyzed, FxHashSet<String>> {
+    let expanded = if options.variant_groups { orisu_candidate::group::expand_in_strings(source) } else { None };
+    let Some(analysis) = orisu_analyze::analyze(expanded.as_deref().unwrap_or(source), path, &options.positions) else {
+        return Err(orisu_scanner::file_candidates(source.as_bytes().to_vec(), extension(path)));
+    };
+    let mut pinned: FxHashSet<String> = analysis.pinned.into_iter().collect();
+    for string in &analysis.strings {
+        pinned.extend(orisu_scanner::file_candidates(string.as_bytes().to_vec(), "js"));
+    }
+    Ok(Analyzed { expanded, tokens: analysis.tokens, pinned, fragments: analysis.fragments, name_merger: analysis.name_merger })
 }
 
 #[derive(Default)]
@@ -94,50 +130,41 @@ fn in_node_modules(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == "node_modules")
 }
 
-fn string_candidates(strings: &[String], out: &mut FxHashSet<String>) {
-    for string in strings {
-        out.extend(orisu_scanner::scanner::file_candidates(string.as_bytes().to_vec(), "js"));
-    }
-}
-
-fn file_facts(path: &Path, entry: &Path, options: &Options) -> Facts {
-    let mut facts = Facts::default();
-    let Ok(content) = std::fs::read(path) else { return facts };
+fn file_facts(path: &Path, entry: &Path, options: &Options) -> Result<Facts, String> {
+    let content = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let ext = extension(path);
     if ext == "css" {
-        if path != entry {
-            facts.pinned = css::classes(&String::from_utf8_lossy(&content));
-        }
-        return facts;
+        let pinned = if path == entry { FxHashSet::default() } else { css::classes(&String::from_utf8_lossy(&content)) };
+        return Ok(Facts { pinned, ..Facts::default() });
     }
     if JS_EXTENSIONS.contains(&ext)
         && !in_node_modules(path)
         && let Ok(source) = std::str::from_utf8(&content)
-        && let expanded = options.variant_groups.then(|| orisu_candidate::group::expand_in_strings(source)).flatten()
-        && let source = expanded.as_deref().unwrap_or(source)
-        && let Some(analysis) = orisu_analyze::analyze(source, path, &options.positions)
     {
-        facts.tokens = analysis.tokens.iter().map(|t| source[t.start as usize..t.end as usize].to_owned()).collect();
-        facts.pinned.extend(analysis.pinned);
-        string_candidates(&analysis.strings, &mut facts.pinned);
-        facts.fragments = analysis.fragments;
-        return facts;
+        return Ok(match analyze_js(source, path, options) {
+            Ok(analyzed) => {
+                let source = analyzed.source(source);
+                let tokens = analyzed.tokens.iter().map(|t| source[t.start as usize..t.end as usize].to_owned()).collect();
+                Facts { tokens, pinned: analyzed.pinned, fragments: analyzed.fragments }
+            }
+            Err(pinned) => Facts { pinned, ..Facts::default() },
+        });
     }
-    facts.pinned = orisu_scanner::scanner::file_candidates(content, ext);
-    facts
+    Ok(Facts { pinned: orisu_scanner::file_candidates(content, ext), ..Facts::default() })
 }
 
-/// Rewrites the class positions of a module into placeholders. A module that does not parse keeps its code and pins
-/// every candidate in it.
+/// Rewrites the class positions of a module into placeholders, expanding its variant groups first when asked. A module
+/// that does not parse keeps its code and pins every candidate in it.
 pub fn module(source: &str, path: &Path, options: &Options) -> Result<Module, String> {
     if source.contains(rewrite::MARKER) {
         return Err(format!("{} already contains `{}`, which `mangle` reserves for its placeholders.", path.display(), rewrite::MARKER));
     }
-    let Some(analysis) = orisu_analyze::analyze(source, path, &options.positions) else {
-        let pinned = orisu_scanner::scanner::file_candidates(source.as_bytes().to_vec(), extension(path));
-        return Ok(Module { code: None, pinned: pinned.into_iter().collect(), fragments: Vec::new(), name_merger: None });
+    let analyzed = match analyze_js(source, path, options) {
+        Ok(analyzed) => analyzed,
+        Err(pinned) => return Ok(Module { code: None, pinned: pinned.into_iter().collect(), fragments: Vec::new(), name_merger: None }),
     };
-    let edits: Vec<_> = analysis
+    let source = analyzed.source(source);
+    let edits: Vec<_> = analyzed
         .tokens
         .iter()
         .map(|t| {
@@ -146,15 +173,15 @@ pub fn module(source: &str, path: &Path, options: &Options) -> Result<Module, St
             (t.start as usize..t.end as usize, text)
         })
         .collect();
-    let code = (!edits.is_empty()).then(|| rewrite::apply(source, &path.to_string_lossy(), &edits));
-    let mut pinned: FxHashSet<String> = analysis.pinned.into_iter().collect();
-    string_candidates(&analysis.strings, &mut pinned);
-    Ok(Module { code, pinned: pinned.into_iter().collect(), fragments: analysis.fragments, name_merger: analysis.name_merger })
+    let rewrite = !edits.is_empty() || analyzed.expanded.is_some();
+    let code = rewrite.then(|| rewrite::apply(source, &path.to_string_lossy(), &edits));
+    Ok(Module { code, pinned: analyzed.pinned.into_iter().collect(), fragments: analyzed.fragments, name_merger: analyzed.name_merger })
 }
 
-/// Picks the classes to rename and their short names.
-pub fn plan(merger: &mut Merger<'_, '_>, input: &Input<'_>, options: &Options) -> Plan {
-    let facts = input.files.par_iter().map(|path| file_facts(path, input.entry, options)).reduce(Facts::default, Facts::join);
+/// Picks the classes to rename and their short names; fails when a scanned file cannot be read.
+pub fn plan(merger: &mut Merger<'_, '_>, input: &Input<'_>, options: &Options) -> Result<Plan, String> {
+    let facts =
+        input.files.par_iter().map(|path| file_facts(path, input.entry, options)).try_reduce(Facts::default, |a, b| Ok(a.join(b)))?;
     let selector_classes = css::classes(input.css);
     let kept: FxHashSet<&str> = options.keep.iter().map(String::as_str).chain(input.inline.iter().copied()).collect();
     let mut renamed: Vec<&str> = facts
@@ -173,15 +200,8 @@ pub fn plan(merger: &mut Merger<'_, '_>, input: &Input<'_>, options: &Options) -
     let mut shaped: Vec<(String, Option<u32>, &str)> =
         renamed.iter().map(|&class| merger.class_shape(class)).zip(&renamed).map(|((g, s), c)| (g, s, *c)).collect();
     let renamed_set: FxHashSet<&str> = renamed.iter().copied().collect();
-    let kept_classes: Vec<&str> = input.candidates.iter().map(String::as_str).filter(|c| !renamed_set.contains(c)).collect();
-    let table = merger.table(kept_classes.iter().copied());
+    let (table, kept_groups) = merger.table(input.candidates.iter().map(String::as_str).filter(|c| !renamed_set.contains(c)));
 
-    let mut kept_groups = FxHashSet::default();
-    for &class in &kept_classes {
-        if let (group, Some(_)) = merger.class_shape(class) {
-            kept_groups.insert(group);
-        }
-    }
     let mut groups: Vec<String> = shaped.iter().filter(|(g, s, _)| s.is_some() && !g.is_empty()).map(|(g, _, _)| g.clone()).collect();
     groups.sort_unstable();
     groups.dedup();
@@ -194,7 +214,7 @@ pub fn plan(merger: &mut Merger<'_, '_>, input: &Input<'_>, options: &Options) -
     shaped.sort_unstable_by_key(|(g, s, c)| (s.is_none(), s.map(|_| ids[g.as_str()]), *s, *c));
 
     let mut reserved: FxHashSet<&str> = facts.tokens.iter().map(String::as_str).collect();
-    reserved.extend(table.entries.keys().map(String::as_str));
+    reserved.extend(table.keys.iter().map(String::as_str));
     reserved.extend(selector_classes.iter().map(String::as_str));
     reserved.extend(kept.iter().copied());
     reserved.extend(facts.pinned.iter().map(String::as_str));
@@ -223,11 +243,83 @@ pub fn plan(merger: &mut Merger<'_, '_>, input: &Input<'_>, options: &Options) -
         }
         names.insert((*class).to_owned(), short);
     }
-    let shorts = names.values().cloned().collect();
-    Plan { names, shorts, table, name_table }
+    Ok(Plan::new(names, table, name_table))
+}
+
+/// The saved form of a [`Plan`].
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanJson {
+    /// Each renamed class followed by its short name.
+    names: Vec<String>,
+    keys: Vec<String>,
+    values: Vec<u32>,
+    erases: Vec<Vec<u32>>,
+    name_prefix: String,
+    groups: Vec<String>,
+    opaque: u32,
+    runs: Vec<(u32, Vec<u32>)>,
+    holes: Vec<u64>,
 }
 
 impl Plan {
+    fn new(names: IndexMap<String, String, FxBuildHasher>, table: MergeTable, name_table: NameTable) -> Self {
+        let shorts = names.values().cloned().collect();
+        Self { names, shorts, table, name_table }
+    }
+
+    /// Renamed classes and their short names, in naming order.
+    pub fn names(&self) -> &IndexMap<String, String, FxBuildHasher> {
+        &self.names
+    }
+
+    /// Shapes of the classes that keep their names.
+    pub fn table(&self) -> &MergeTable {
+        &self.table
+    }
+
+    pub fn name_table(&self) -> &NameTable {
+        &self.name_table
+    }
+
+    /// The plan's fields, which `from_json` reads back.
+    pub fn to_json(&self) -> Map<String, Value> {
+        let names = &self.name_table;
+        let json = PlanJson {
+            names: self.names.iter().flat_map(|(class, short)| [class.clone(), short.clone()]).collect(),
+            keys: self.table.keys.clone(),
+            values: self.table.values.clone(),
+            erases: self.table.erases.clone(),
+            name_prefix: names.prefix.clone(),
+            groups: names.groups.clone(),
+            opaque: names.opaque,
+            runs: names.runs.clone(),
+            holes: names.holes.clone(),
+        };
+        match serde_json::to_value(json) {
+            Ok(Value::Object(map)) => map,
+            _ => unreachable!("a struct serializes to an object"),
+        }
+    }
+
+    pub fn from_json(value: &Value) -> Result<Plan, String> {
+        let invalid = |what: &str| format!("the saved mangle plan is invalid: {what}");
+        let json = PlanJson::deserialize(value).map_err(|e| invalid(&e.to_string()))?;
+        if json.names.len() % 2 != 0 {
+            return Err(invalid("`names` has an odd length"));
+        }
+        if json.keys.len() != json.values.len() {
+            return Err(invalid("`keys` and `values` differ in length"));
+        }
+        let mut pairs = json.names.into_iter();
+        let names = std::iter::from_fn(|| Some((pairs.next()?, pairs.next()?))).collect();
+        let table = MergeTable { keys: json.keys, values: json.values, erases: json.erases };
+        let name_table =
+            NameTable { prefix: json.name_prefix, groups: json.groups, opaque: json.opaque, runs: json.runs, holes: json.holes };
+        Ok(Plan::new(names, table, name_table))
+    }
+
+    /// `css` with the renamed classes of its selectors replaced by their short names.
     pub fn rename_css(&self, css: &str) -> String {
         css::rename(css, &self.names)
     }
@@ -235,20 +327,13 @@ impl Plan {
     /// `code` with each placeholder replaced by its class's short name, or by the class when it keeps its name, and
     /// a JSON source map back to `code`; `None` without placeholders.
     pub fn fill(&self, code: &str, name: &str) -> Option<(String, String)> {
-        let edits: Vec<_> = rewrite::placeholders(code)
-            .into_iter()
-            .map(|(range, class)| {
-                let text = self.names.get(&class).cloned().unwrap_or(class);
-                (range, text)
-            })
-            .collect();
-        (!edits.is_empty()).then(|| rewrite::apply(code, name, &edits))
+        fill(code, name, |class| self.names.get(&class).cloned().unwrap_or(class))
     }
 
     /// The error of a built module that uses renamed classes where they cannot be renamed.
     pub fn check_module(&self, file: &str, module: &Module) -> Option<String> {
         if let Some(import) = &module.name_merger {
-            return Some(name_merger_message(file, import));
+            return Some(orisu_diagnostics::message(Code::MangleNameMerger, &[("file", file.to_owned()), ("module", import.clone())]));
         }
         let mut pinned: Vec<&String> = module.pinned.iter().filter(|class| self.names.contains_key(*class)).collect();
         pinned.sort_unstable();
@@ -256,7 +341,7 @@ impl Plan {
             .first()
             .map(|c| c.as_str())
             .or_else(|| self.names.keys().map(String::as_str).find(|class| module.fragments.iter().any(|f| f.matches(class))))?;
-        Some(Report::new(Code::MangleUntrackedClass, Span::new(0, 0)).arg("class", class).arg("file", file).message())
+        Some(orisu_diagnostics::message(Code::MangleUntrackedClass, &[("class", class.to_owned()), ("file", file.to_owned())]))
     }
 
     /// The error of a stylesheet outside the build whose classes the plan renames or reuses.
@@ -271,17 +356,21 @@ impl Plan {
             } else {
                 return None;
             };
-            Some(
-                Report::new(Code::MangleClassCollision, Span::new(0, 0))
-                    .arg("file", file)
-                    .arg("class", class)
-                    .arg("reason", reason)
-                    .message(),
-            )
+            Some(orisu_diagnostics::message(
+                Code::MangleClassCollision,
+                &[("file", file.to_owned()), ("class", class), ("reason", reason.to_owned())],
+            ))
         })
     }
 }
 
-pub fn name_merger_message(file: &str, module: &str) -> String {
-    Report::new(Code::MangleNameMerger, Span::new(0, 0)).arg("file", file).arg("module", module).message()
+/// `code` with each placeholder replaced by its class, for a build that renames nothing, and a JSON source map back to
+/// `code`; `None` without placeholders.
+pub fn fill_placeholders(code: &str, name: &str) -> Option<(String, String)> {
+    fill(code, name, |class| class)
+}
+
+fn fill(code: &str, name: &str, short: impl Fn(String) -> String) -> Option<(String, String)> {
+    let edits: Vec<_> = rewrite::placeholders(code).into_iter().map(|(range, class)| (range, short(class))).collect();
+    (!edits.is_empty()).then(|| rewrite::apply(code, name, &edits))
 }

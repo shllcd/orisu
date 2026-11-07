@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 pub use catalog::{CATALOG, Code, Entry, Example};
-pub use render::{LineIndex, fill, placeholders};
+pub(crate) use render::{LineIndex, fill};
 pub use skill::render_skill;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -26,7 +26,6 @@ impl Severity {
     }
 }
 
-/// Source bytes `start..end`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Span {
     pub start: u32,
@@ -84,6 +83,12 @@ pub struct Diagnostic {
     pub rendered: String,
 }
 
+/// The catalog message of `code` with its `[CODE]` prefix, for a diagnostic that has no position in a source.
+pub fn message(code: Code, args: &[(&'static str, String)]) -> String {
+    let entry = code.entry();
+    format!("[{}] {}", entry.name, fill(entry.message, args))
+}
+
 /// A diagnostic before its position is resolved and its text rendered from the catalog.
 pub struct Report {
     pub code: Code,
@@ -117,16 +122,11 @@ impl Report {
 
     /// The catalog message with its `[CODE]` prefix.
     pub fn message(&self) -> String {
-        let entry = self.code.entry();
-        format!("[{}] {}", entry.name, fill(entry.message, &self.args))
+        message(self.code, &self.args)
     }
 
     pub fn fix_title(&self) -> Option<String> {
         self.code.entry().fix.map(|template| fill(template, &self.args))
-    }
-
-    pub fn code(&self) -> Code {
-        self.code
     }
 
     pub fn labels(&self) -> &[Label] {
@@ -189,6 +189,6 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic]) -> String {
     out
 }
 
-pub fn utf16_len(s: &str) -> u32 {
+pub(crate) fn utf16_len(s: &str) -> u32 {
     if s.is_ascii() { s.len() as u32 } else { s.encode_utf16().count() as u32 }
 }

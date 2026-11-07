@@ -13,7 +13,7 @@ mod typography;
 use super::{Cx, Named, Registrar, Spacing, Utilities};
 use orisu_allocator::{Allocator, ArenaString};
 use orisu_ast::{Node, Nodes};
-use orisu_parser::infer::{DataType, infer_data_type, is_multiple_of_quarter, is_positive_integer, is_strict_positive_integer};
+use orisu_parser::infer::{DataType, infer_data_type, is_positive_integer, is_strict_positive_integer};
 use orisu_parser::segment::segment;
 use orisu_parser::shadow::replace_shadow_colors;
 use orisu_theme::Theme;
@@ -47,8 +47,7 @@ fn bare_strict_integer_repeat<'a>(cx: &Cx<'a, '_>, n: Named<'a>) -> Option<&'a s
 }
 
 fn spacing_bare<'a>(cx: &Cx<'a, '_>, n: Named<'a>) -> Option<&'a str> {
-    cx.resolve(None, &["--spacing"]).filter(|v| !v.is_empty())?;
-    is_multiple_of_quarter(n.value).then(|| cx.cat(&["--spacing(", n.value, ")"]))
+    cx.spacing(n.value, false)
 }
 
 const NEG: Spacing = Spacing { supports_negative: true, supports_fractions: false };
@@ -108,6 +107,27 @@ fn supports_lab<'a>(cx: &Cx<'a, '_>, decl: Node<'a>) -> Node<'a> {
     Node::AtRule { name: "@supports", params: "(color: lab(from red l a b))", nodes: cx.nodes([decl]) }
 }
 
+/// Pushes `property: render(…)`, with each shadow color wrapped in `color_var` and given `alpha`; when that needs relative
+/// color syntax, a plain fallback comes first and the alpha version moves into `@supports`.
+fn push_alpha_replaced<'a>(
+    cx: &Cx<'a, '_>,
+    out: &mut Nodes<'a>,
+    property: &'a str,
+    alpha: Option<&'a str>,
+    color_var: &str,
+    render: impl Fn(&mut dyn FnMut(&'a str) -> &'a str) -> &'a str,
+) {
+    let inject = |color: &str| cx.cat(&["var(", color_var, ", ", color, ")"]);
+    let mut fallback = false;
+    let replaced = render(&mut |color| inject(alpha_color(cx, color, alpha, &mut fallback)));
+    if fallback {
+        out.push(cx.decl(property, render(&mut |color| inject(color))));
+        out.push(supports_lab(cx, cx.decl(property, replaced)));
+    } else {
+        out.push(cx.decl(property, replaced));
+    }
+}
+
 fn push_alpha_replaced_shadow<'a>(
     cx: &Cx<'a, '_>,
     out: &mut Nodes<'a>,
@@ -117,16 +137,14 @@ fn push_alpha_replaced_shadow<'a>(
     color_var: &str,
     prefix: &str,
 ) {
-    let inject = |color: &str| cx.cat(&["var(", color_var, ", ", color, ")"]);
-    let mut fallback = false;
-    let replaced = replace_shadow_colors(value, cx.alloc, &mut |color| inject(alpha_color(cx, color, alpha, &mut fallback)));
-    let apply_prefix = |x: &'a str| -> &'a str {
+    push_alpha_replaced(cx, out, property, alpha, color_var, |replace| {
+        let replaced = replace_shadow_colors(value, cx.alloc, replace);
         if prefix.is_empty() {
-            return x;
+            return replaced;
         }
         let prefix = orisu_ast::bytes::trim(prefix);
         let mut out = ArenaString::new_in(cx.alloc);
-        for (i, v) in segment(x, b',').into_iter().enumerate() {
+        for (i, v) in segment(replaced, b',').into_iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
@@ -135,14 +153,7 @@ fn push_alpha_replaced_shadow<'a>(
             out.push_str(orisu_ast::bytes::trim(v));
         }
         out.into_bump_str()
-    };
-    if fallback {
-        let plain = replace_shadow_colors(value, cx.alloc, &mut |color| inject(color));
-        out.push(cx.decl(property, apply_prefix(plain)));
-        out.push(supports_lab(cx, cx.decl(property, apply_prefix(replaced))));
-    } else {
-        out.push(cx.decl(property, apply_prefix(replaced)));
-    }
+    });
 }
 
 fn push_alpha_replaced_drop_shadow<'a>(
@@ -153,8 +164,7 @@ fn push_alpha_replaced_drop_shadow<'a>(
     alpha: Option<&'a str>,
     color_var: &str,
 ) {
-    let inject = |color: &str| cx.cat(&["var(", color_var, ", ", color, ")"]);
-    let drop_shadows = |replace: &mut dyn FnMut(&'a str) -> &'a str| -> &'a str {
+    push_alpha_replaced(cx, out, property, alpha, color_var, |replace| {
         let mut out = ArenaString::new_in(cx.alloc);
         for (i, v) in segment(value, b',').into_iter().enumerate() {
             if i > 0 {
@@ -165,13 +175,5 @@ fn push_alpha_replaced_drop_shadow<'a>(
             out.push(')');
         }
         out.into_bump_str()
-    };
-    let mut fallback = false;
-    let replaced = drop_shadows(&mut |color| inject(alpha_color(cx, color, alpha, &mut fallback)));
-    if fallback {
-        out.push(cx.decl(property, drop_shadows(&mut |color| inject(color))));
-        out.push(supports_lab(cx, cx.decl(property, replaced)));
-    } else {
-        out.push(cx.decl(property, replaced));
-    }
+    });
 }

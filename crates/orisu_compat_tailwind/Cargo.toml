@@ -1,6 +1,6 @@
 [package]
 name = "orisu_compat_tailwind"
-description = "Tailwind CSS 4.3.4 compatibility: built-in stylesheets, legacy utilities and v3 `theme()` paths."
+description = "Tailwind CSS 4.3.4 compatibility: built-in stylesheets, legacy utilities, v3 `theme()` paths, Node-style `@import` resolution and an owned compiler."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,11 +10,13 @@ publish.workspace = true
 orisu_allocator.workspace = true
 orisu_ast.workspace = true
 orisu_candidate.workspace = true
+orisu_canonical.workspace = true
 orisu_compiler.workspace = true
 orisu_parser.workspace = true
 orisu_registry.workspace = true
 orisu_theme.workspace = true
-indexmap.workspace = true
+indexmap = { workspace = true, features = ["serde"] }
 rustc-hash.workspace = true
+self_cell.workspace = true
 serde.workspace = true
 serde_json.workspace = true

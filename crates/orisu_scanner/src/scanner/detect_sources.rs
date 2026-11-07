@@ -1,5 +1,5 @@
 use crate::GlobEntry;
-use crate::scanner::auto_source_detection::IGNORED_CONTENT_DIRS;
+use crate::scanner::auto_source_detection::{is_ignored_content_dir, list};
 use globwalk::DirEntry;
 use rustc_hash::FxHashSet;
 use std::cmp::Ordering;
@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use std::sync;
 use walkdir::WalkDir;
 
-static KNOWN_EXTENSIONS: sync::LazyLock<Vec<&'static str>> = sync::LazyLock::new(|| {
-    include_str!("fixtures/template-extensions.txt").trim().lines().filter(|x| !x.starts_with('#')).filter(|x| !x.is_empty()).collect()
-});
+static KNOWN_EXTENSIONS: sync::LazyLock<Vec<&'static str>> =
+    sync::LazyLock::new(|| list(include_str!("fixtures/template-extensions.txt")).collect());
+
+/// The directory of static assets below a base, which like in Tailwind gets no deep glob of its own.
+const STATIC_DIR: &str = "public";
 
 fn sort_by_dir_and_name(a: &DirEntry, z: &DirEntry) -> Ordering {
     match (a.file_type().is_dir(), z.file_type().is_dir()) {
@@ -23,7 +25,7 @@ pub fn resolve_globs(base: PathBuf, dirs: &FxHashSet<PathBuf>, extensions: &FxHa
     let mut found_extensions: FxHashSet<String> = FxHashSet::from_iter(KNOWN_EXTENSIONS.iter().map(|x| x.to_string()));
     found_extensions.extend(extensions.iter().cloned());
 
-    let forced_static_directories: FxHashSet<PathBuf> = FxHashSet::from_iter(vec![base.join("public")]);
+    let static_dir = base.join(STATIC_DIR);
 
     let mut deep_globable_directories: FxHashSet<PathBuf> = Default::default();
 
@@ -64,10 +66,7 @@ pub fn resolve_globs(base: PathBuf, dirs: &FxHashSet<PathBuf>, extensions: &FxHa
             continue;
         }
 
-        if IGNORED_CONTENT_DIRS.iter().any(|dir| match path.file_name() {
-            Some(name) => name == *dir,
-            None => false,
-        }) {
+        if path.file_name().is_some_and(is_ignored_content_dir) {
             it.skip_current_dir();
             continue;
         }
@@ -80,7 +79,7 @@ pub fn resolve_globs(base: PathBuf, dirs: &FxHashSet<PathBuf>, extensions: &FxHa
             continue;
         }
 
-        if forced_static_directories.contains(path) {
+        if path == static_dir {
             it.skip_current_dir();
             continue;
         }

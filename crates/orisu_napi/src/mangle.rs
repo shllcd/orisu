@@ -3,7 +3,7 @@ use napi::{Error, Result};
 use napi_derive::napi;
 use orisu_analyze::Fragment;
 use orisu_merge::Merger;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 #[napi(object)]
@@ -15,28 +15,23 @@ pub struct MangleOptions {
     pub keep: Option<Vec<String>>,
     /// Functions whose arguments are class lists, besides `cn`, `clsx` and the like.
     pub class_functions: Option<Vec<String>>,
-    /// Attributes and properties whose values are class lists, besides `class` and `className`.
+    /// Attributes and properties whose values are class lists, besides `class`, `className`, `*ClassName` and framework forms like `:class` and `[ngClass]`.
     pub class_attributes: Option<Vec<String>>,
     pub variant_groups: Option<bool>,
 }
 
 impl MangleOptions {
     fn core(&self) -> Result<orisu_mangle::Options> {
-        let prefix = self.prefix.clone().unwrap_or_default();
-        if !orisu_mangle::names::valid_prefix(&prefix) {
-            return Err(Error::from_reason(format!(
-                "`mangle.prefix` must be a CSS identifier start of letters, digits, `_` and `-`, got `{prefix}`"
-            )));
-        }
-        Ok(orisu_mangle::Options {
-            prefix,
-            keep: self.keep.clone().unwrap_or_default(),
-            positions: orisu_analyze::Options {
+        orisu_mangle::Options::new(
+            self.prefix.clone().unwrap_or_default(),
+            self.keep.clone().unwrap_or_default(),
+            orisu_analyze::Options {
                 functions: self.class_functions.clone().unwrap_or_default(),
                 attributes: self.class_attributes.clone().unwrap_or_default(),
             },
-            variant_groups: self.variant_groups.unwrap_or(false),
-        })
+            self.variant_groups.unwrap_or(false),
+        )
+        .map_err(Error::from_reason)
     }
 }
 
@@ -97,13 +92,14 @@ fn fragment_to_js(fragment: Fragment) -> ClassFragment {
     ClassFragment { kind: kind.to_owned(), text }
 }
 
-fn fragment_from_js(fragment: &ClassFragment) -> Fragment {
+fn fragment_from_js(fragment: &ClassFragment) -> Result<Fragment> {
     let text = fragment.text.clone();
-    match fragment.kind.as_str() {
+    Ok(match fragment.kind.as_str() {
         "prefix" => Fragment::Prefix(text),
         "suffix" => Fragment::Suffix(text),
-        _ => Fragment::Infix(text),
-    }
+        "infix" => Fragment::Infix(text),
+        kind => return Err(Error::from_reason(format!("unknown class fragment kind `{kind}`"))),
+    })
 }
 
 /// Rewrites the class positions of a module into placeholders that `ManglePlan.fill` resolves.
@@ -121,6 +117,12 @@ pub fn mangle_module(code: String, path: String, options: Option<MangleOptions>)
     })
 }
 
+/// `code` with its placeholders turned back into the classes they hold, for a build without a plan; `null` when it has none.
+#[napi]
+pub fn fill_placeholders(code: String, name: String) -> Option<FilledCode> {
+    orisu_mangle::fill_placeholders(&code, &name).map(|(code, map)| FilledCode { code, map })
+}
+
 #[napi]
 impl Compiler {
     /// Picks the classes to rename and their short names.
@@ -128,7 +130,7 @@ impl Compiler {
     pub fn mangle(&mut self, input: MangleInput, options: Option<MangleOptions>) -> Result<ManglePlan> {
         let options = options.unwrap_or_default().core()?;
         let files: Vec<PathBuf> = input.files.into_iter().map(PathBuf::from).collect();
-        self.with_mut(|compiler| {
+        self.0.with_mut(|compiler| {
             let inline = compiler.inline_candidates.clone();
             let core_input = orisu_mangle::Input {
                 files: &files,
@@ -138,7 +140,7 @@ impl Compiler {
                 inline: &inline,
             };
             let prefix = compiler.design_system.theme.prefix().map(str::to_owned);
-            let plan = orisu_mangle::plan(&mut Merger::new(compiler.session()), &core_input, &options);
+            let plan = orisu_mangle::plan(&mut Merger::new(compiler.session()), &core_input, &options).map_err(Error::from_reason)?;
             Ok(ManglePlan { inner: plan, prefix })
         })
     }
@@ -148,18 +150,6 @@ impl Compiler {
 pub struct ManglePlan {
     inner: orisu_mangle::Plan,
     prefix: Option<String>,
-}
-
-fn invalid(what: &str) -> Error {
-    Error::from_reason(format!("the saved mangle plan has an invalid `{what}`"))
-}
-
-fn strings(value: &Value, what: &str) -> Result<Vec<String>> {
-    value.as_array().ok_or_else(|| invalid(what))?.iter().map(|v| v.as_str().map(str::to_owned).ok_or_else(|| invalid(what))).collect()
-}
-
-fn numbers(value: &Value, what: &str) -> Result<Vec<u64>> {
-    value.as_array().ok_or_else(|| invalid(what))?.iter().map(|v| v.as_u64().ok_or_else(|| invalid(what))).collect()
 }
 
 #[napi]
@@ -178,14 +168,14 @@ impl ManglePlan {
 
     /// The error of a built module that uses renamed classes where they cannot be renamed.
     #[napi]
-    pub fn check_module(&self, file: String, module: MangledModule) -> Option<String> {
+    pub fn check_module(&self, file: String, module: MangledModule) -> Result<Option<String>> {
         let module = orisu_mangle::Module {
             code: None,
             pinned: module.pinned,
-            fragments: module.fragments.iter().map(fragment_from_js).collect(),
+            fragments: module.fragments.iter().map(fragment_from_js).collect::<Result<_>>()?,
             name_merger: module.name_merger,
         };
-        self.inner.check_module(&file, &module)
+        Ok(self.inner.check_module(&file, &module))
     }
 
     /// The error of a stylesheet outside the build whose classes the plan renames or reuses.
@@ -197,20 +187,20 @@ impl ManglePlan {
     /// Renamed classes and their short names, in naming order.
     #[napi(getter)]
     pub fn names(&self) -> Vec<Vec<String>> {
-        self.inner.names.iter().map(|(class, short)| vec![class.clone(), short.clone()]).collect()
+        self.inner.names().iter().map(|(class, short)| vec![class.clone(), short.clone()]).collect()
     }
 
     /// The merge table of the classes that keep their names, with the short names of the others.
     #[napi]
     pub fn merge_table(&self) -> MergeTable {
-        let table = &self.inner.table;
-        let names = &self.inner.name_table;
+        let table = self.inner.table();
+        let names = self.inner.name_table();
         MergeTable {
             prefix: self.prefix.clone(),
-            keys: table.entries.keys().cloned().collect(),
-            values: table.entries.values().copied().collect(),
+            keys: table.keys.clone(),
+            values: table.values.clone(),
             erases: table.erases.clone(),
-            names: (!self.inner.names.is_empty()).then(|| NameTable {
+            names: (!self.inner.names().is_empty()).then(|| NameTable {
                 prefix: names.prefix.clone(),
                 groups: names.groups.clone(),
                 opaque: names.opaque,
@@ -223,60 +213,15 @@ impl ManglePlan {
     /// The plan as JSON, for a build in another process to read with `ManglePlan.fromJson`.
     #[napi]
     pub fn to_json(&self) -> String {
-        let plan = &self.inner;
-        let names = &plan.name_table;
-        json!({
-            "prefix": self.prefix,
-            "names": plan.names.iter().flat_map(|(class, short)| [class, short]).collect::<Vec<_>>(),
-            "keys": plan.table.entries.keys().collect::<Vec<_>>(),
-            "values": plan.table.entries.values().collect::<Vec<_>>(),
-            "erases": plan.table.erases,
-            "namePrefix": names.prefix,
-            "groups": names.groups,
-            "opaque": names.opaque,
-            "runs": names.runs,
-            "holes": names.holes,
-        })
-        .to_string()
+        let mut out = self.inner.to_json();
+        out.insert("prefix".to_owned(), self.prefix.clone().into());
+        Value::Object(out).to_string()
     }
 
     #[napi(factory)]
     pub fn from_json(json: String) -> Result<ManglePlan> {
         let value: Value = serde_json::from_str(&json).map_err(|e| Error::from_reason(e.to_string()))?;
-        let pairs = strings(&value["names"], "names")?;
-        let names: indexmap::IndexMap<String, String, rustc_hash::FxBuildHasher> =
-            pairs.chunks(2).map(|pair| (pair[0].clone(), pair.get(1).cloned().unwrap_or_default())).collect();
-        let keys = strings(&value["keys"], "keys")?;
-        let values = numbers(&value["values"], "values")?;
-        let erases = value["erases"]
-            .as_array()
-            .ok_or_else(|| invalid("erases"))?
-            .iter()
-            .map(|list| numbers(list, "erases").map(|list| list.into_iter().map(|n| n as u32).collect()))
-            .collect::<Result<Vec<Vec<u32>>>>()?;
-        let runs = value["runs"]
-            .as_array()
-            .ok_or_else(|| invalid("runs"))?
-            .iter()
-            .map(|run| {
-                let group = run[0].as_u64().ok_or_else(|| invalid("runs"))? as u32;
-                let shapes = numbers(&run[1], "runs")?.into_iter().map(|n| n as u32).collect();
-                Ok((group, shapes))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let shorts = names.values().cloned().collect();
-        let inner = orisu_mangle::Plan {
-            names,
-            shorts,
-            table: orisu_merge::MergeTable { erases, entries: keys.into_iter().zip(values.into_iter().map(|n| n as u32)).collect() },
-            name_table: orisu_mangle::NameTable {
-                prefix: value["namePrefix"].as_str().unwrap_or_default().to_owned(),
-                groups: strings(&value["groups"], "groups")?,
-                opaque: value["opaque"].as_u64().ok_or_else(|| invalid("opaque"))? as u32,
-                runs,
-                holes: numbers(&value["holes"], "holes")?,
-            },
-        };
+        let inner = orisu_mangle::Plan::from_json(&value).map_err(Error::from_reason)?;
         Ok(ManglePlan { inner, prefix: value["prefix"].as_str().map(str::to_owned) })
     }
 }

@@ -1,6 +1,8 @@
-const ALPHABET: &[u8; 64] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
-const FIRST: u64 = 52;
-const REST: u64 = 64;
+/// The characters of short names; the JS `cn` runtime rebuilds names from the generated copy in `merge-keys.ts`.
+pub const ALPHABET: &[u8; 64] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+/// How many leading characters of [`ALPHABET`] can start a name.
+pub const FIRST: u64 = 52;
+const REST: u64 = ALPHABET.len() as u64;
 
 /// The `k`-th short name: every name of one character, then of two, and so on. The first character is a letter, so
 /// a name is a CSS identifier that needs no escape.
@@ -22,7 +24,7 @@ pub fn name(mut k: u64) -> String {
 }
 
 /// Whether `prefix` keeps every `prefix + name` a CSS identifier without escapes.
-pub fn valid_prefix(prefix: &str) -> bool {
+pub fn valid_name_prefix(prefix: &str) -> bool {
     let bytes = prefix.as_bytes();
     bytes.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
         && !bytes.first().is_some_and(u8::is_ascii_digit)

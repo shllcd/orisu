@@ -6,7 +6,7 @@ use crossbeam_channel::TryRecvError;
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeConfiguration, DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
-    Notification as _, PublishDiagnostics,
+    Notification as _, PublishDiagnostics, ShowMessage,
 };
 use lsp_types::request::{
     CodeActionRequest, ColorPresentationRequest, Completion, DocumentColor, HoverRequest, RegisterCapability, Request as _,
@@ -15,9 +15,9 @@ use lsp_types::request::{
 use lsp_types::{
     CodeActionKind, CodeActionOptions, CodeActionProviderCapability, ColorProviderCapability, CompletionOptions, Diagnostic,
     DiagnosticSeverity, DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, HoverProviderCapability,
-    InitializeParams, InitializeResult, NumberOrString, Position, PositionEncodingKind, PublishDiagnosticsParams, Range, Registration,
-    RegistrationParams, SaveOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    InitializeParams, InitializeResult, MessageType, NumberOrString, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
+    Registration, RegistrationParams, SaveOptions, ServerCapabilities, ServerInfo, ShowMessageParams, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
 use orisu_compiler::compiler::CompileError;
 use rustc_hash::FxHashMap;
@@ -41,11 +41,14 @@ pub fn run() -> Result<()> {
     let encoding = if utf8 { Encoding::Utf8 } else { Encoding::Utf16 };
     let result = InitializeResult {
         capabilities: capabilities(encoding),
-        server_info: Some(ServerInfo { name: "orisu-lsp".to_owned(), version: Some(env!("CARGO_PKG_VERSION").to_owned()) }),
+        server_info: Some(ServerInfo { name: "orisu-lsp".to_owned(), version: Some(crate::version()) }),
     };
     conn.initialize_finish(id, serde_json::to_value(result)?)?;
     let mut server = Server::new(conn, &params, encoding);
-    server.reload(None);
+    if let Some(options) = &params.initialization_options {
+        server.configure(options)?;
+    }
+    server.reload(Reload::All);
     if params.capabilities.workspace.as_ref().and_then(|w| w.did_change_watched_files).is_some_and(|w| w.dynamic_registration == Some(true))
     {
         server.watch()?;
@@ -80,6 +83,15 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
     }
 }
 
+/// Which projects a reload recompiles, besides new, failed and outgrown ones.
+#[derive(Clone, Copy)]
+enum Reload<'p> {
+    All,
+    Outgrown,
+    /// Those whose entry point or a stylesheet it imports is among these.
+    Changed(&'p [PathBuf]),
+}
+
 struct Server {
     conn: Connection,
     encoding: Encoding,
@@ -104,7 +116,6 @@ impl Server {
         if roots.is_empty() {
             roots.extend(root_uri.and_then(uri_path));
         }
-        let settings = params.initialization_options.as_ref().map(Settings::from_value).unwrap_or_default();
         let item_defaults = params
             .capabilities
             .text_document
@@ -115,7 +126,7 @@ impl Server {
             conn,
             encoding,
             roots,
-            settings,
+            settings: Settings::default(),
             projects: Vec::new(),
             failures: Vec::new(),
             documents: FxHashMap::default(),
@@ -154,7 +165,7 @@ impl Server {
                 Message::Response(_) => {}
             }
             if self.projects.iter().any(Project::needs_reload) {
-                self.reload(Some(&[]));
+                self.reload(Reload::Outgrown);
             }
         }
     }
@@ -175,8 +186,20 @@ impl Server {
         Ok(())
     }
 
-    /// Recompiles every entry point, or with `changed` only those whose stylesheets it lists, besides new and outgrown ones.
-    fn reload(&mut self, changed: Option<&[PathBuf]>) {
+    /// Reads client settings, keeping the default of each invalid field and telling the user about it.
+    fn configure(&mut self, value: &serde_json::Value) -> Result<()> {
+        let (settings, errors) = Settings::from_value(value);
+        self.settings = settings;
+        if !errors.is_empty() {
+            let params =
+                ShowMessageParams { typ: MessageType::WARNING, message: format!("orisu: invalid settings: {}", errors.join("; ")) };
+            self.conn.sender.send(Notification::new(ShowMessage::METHOD.to_owned(), params).into())?;
+        }
+        Ok(())
+    }
+
+    /// Recompiles the entry points `reload` selects, besides new, failed and outgrown ones.
+    fn reload(&mut self, reload: Reload) {
         let failed: Vec<PathBuf> = self.failures.drain(..).map(|(path, _)| path).collect();
         self.stale.clear();
         let mut previous: Vec<Project> = std::mem::take(&mut self.projects);
@@ -192,7 +215,11 @@ impl Server {
                 p.entry == entry
                     && !failed.contains(&entry)
                     && !p.needs_reload()
-                    && changed.is_some_and(|changed| !changed.iter().any(|path| *path == p.entry || p.dependencies.contains(path)))
+                    && match reload {
+                        Reload::All => false,
+                        Reload::Outgrown => true,
+                        Reload::Changed(changed) => !changed.iter().any(|path| *path == p.entry || p.dependencies.contains(path)),
+                    }
             });
             if let Some(at) = kept {
                 self.projects.push(previous.swap_remove(at));
@@ -241,9 +268,17 @@ impl Server {
             || std::fs::read_to_string(path).is_ok_and(|css| project::is_entry(&css))
     }
 
+    /// The deepest project whose directory holds the document. A document outside every project directory, such as a component
+    /// beside a `styles/` folder, gets the project in its workspace folder sharing the most ancestors with it, the deepest on a tie;
+    /// a document outside every workspace folder gets none.
     fn project_for(&self, uri: &Uri) -> Option<&Project> {
-        let path = uri_path(uri);
-        path.and_then(|path| self.projects.iter().find(|p| path.starts_with(&p.dir))).or(self.projects.first())
+        let path = uri_path(uri)?;
+        if let Some(project) = self.projects.iter().find(|p| path.starts_with(&p.dir)) {
+            return Some(project);
+        }
+        let root = self.roots.iter().filter(|root| path.starts_with(root)).max_by_key(|root| root.components().count())?;
+        let shared = |p: &Project| path.components().zip(p.dir.components()).take_while(|(a, b)| a == b).count();
+        self.projects.iter().filter(|p| p.dir.starts_with(root)).min_by_key(|p| std::cmp::Reverse(shared(p)))
     }
 
     fn ctx(&self, uri: &Uri) -> Option<Ctx<'_>> {
@@ -341,21 +376,21 @@ impl Server {
             DidSaveTextDocument::METHOD => {
                 let uri = parse::<DidSaveTextDocument>(notification)?.text_document.uri;
                 if let Some(path) = uri_path(&uri).filter(|path| !self.watching && self.affects(path)) {
-                    self.reload(Some(&[path]));
+                    self.reload(Reload::Changed(&[path]));
                 }
             }
             DidChangeWatchedFiles::METHOD => {
                 let changes = parse::<DidChangeWatchedFiles>(notification)?.changes;
                 let paths: Vec<PathBuf> = changes.iter().filter_map(|change| uri_path(&change.uri)).collect();
                 if paths.iter().any(|path| self.affects(path)) {
-                    self.reload(Some(&paths));
+                    self.reload(Reload::Changed(&paths));
                 }
             }
             DidChangeConfiguration::METHOD => {
                 let settings = parse::<DidChangeConfiguration>(notification)?.settings;
                 if !settings.is_null() {
-                    self.settings = Settings::from_value(&settings);
-                    self.reload(None);
+                    self.configure(&settings)?;
+                    self.reload(Reload::All);
                 }
             }
             _ => {}

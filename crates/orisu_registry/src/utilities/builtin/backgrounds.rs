@@ -1,6 +1,5 @@
 use super::{POSITIONS, REPEATS, Stop, arbitrary_type};
 use crate::utilities::{Cx, Functional, PERCENT_STEPS_OF_5, Registrar, Suggest};
-use orisu_allocator::Vec;
 use orisu_ast::{Node, Nodes};
 use orisu_candidate::{Candidate, CandidateKind, Modifier, UtilityValue};
 use orisu_parser::infer::{DataType, is_positive_integer};
@@ -89,19 +88,11 @@ fn gradient_stop<'a>(
     r: &mut Registrar<'a, '_>,
     name: &str,
     handle: impl for<'t> Fn(&Cx<'a, 't>, &'a str, Stop) -> Option<Nodes<'a>> + Send + Sync + 'a,
-    declarations: impl for<'t> Fn(&Cx<'a, 't>, &'a str, Stop) -> Vec<'a, (&'a str, &'a str)> + Send + Sync + 'a,
 ) {
-    r.functional_decl(
-        name,
-        move |cx, candidate| {
-            let (value, stop) = resolve_gradient_stop(cx, candidate)?;
-            handle(cx, value, stop)
-        },
-        move |cx, candidate| {
-            let (value, stop) = resolve_gradient_stop(cx, candidate)?;
-            Some(declarations(cx, value, stop))
-        },
-    );
+    r.functional_fn(name, move |cx, candidate| {
+        let (value, stop) = resolve_gradient_stop(cx, candidate)?;
+        handle(cx, value, stop)
+    });
     r.suggest(
         name,
         vec![
@@ -231,147 +222,75 @@ pub(super) fn register<'a>(r: &mut Registrar<'a, '_>) {
     });
     r.suggest("bg-radial", vec![Suggest::default().default_value(true).modifiers(&INTERPOLATION_MODIFIERS)]);
 
-    r.functional_decl(
-        "bg",
-        |cx, c| {
-            let CandidateKind::Functional { value, modifier, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    let property = match arbitrary_type(
-                        data_type,
-                        value,
-                        &[
-                            DataType::Image,
-                            DataType::Color,
-                            DataType::Percentage,
-                            DataType::Position,
-                            DataType::BgSize,
-                            DataType::Length,
-                            DataType::Url,
-                        ],
-                    ) {
-                        Some("percentage" | "position") => "background-position",
-                        Some("bg-size" | "length" | "size") => "background-size",
-                        Some("image" | "url") => "background-image",
-                        _ => return cx.one("background-color", cx.as_color(value, modifier)?),
-                    };
-                    if modifier.is_some() {
-                        return None;
-                    }
-                    cx.one(property, value)
+    r.functional_fn("bg", |cx, c| {
+        let CandidateKind::Functional { value, modifier, .. } = c.kind else {
+            return None;
+        };
+        match value? {
+            UtilityValue::Arbitrary { data_type, value } => {
+                let property = match arbitrary_type(
+                    data_type,
+                    value,
+                    &[
+                        DataType::Image,
+                        DataType::Color,
+                        DataType::Percentage,
+                        DataType::Position,
+                        DataType::BgSize,
+                        DataType::Length,
+                        DataType::Url,
+                    ],
+                ) {
+                    Some("percentage" | "position") => "background-position",
+                    Some("bg-size" | "length" | "size") => "background-size",
+                    Some("image" | "url") => "background-image",
+                    _ => return cx.one("background-color", cx.as_color(value, modifier)?),
+                };
+                if modifier.is_some() {
+                    return None;
                 }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(v) = cx.resolve_theme_color(value, modifier, &["--background-color", "--color"]) {
-                        return cx.one("background-color", v);
-                    }
-                    if modifier.is_some() {
-                        return None;
-                    }
-                    cx.one("background-image", cx.resolve(Some(value), &["--background-image"]).filter(|v| !v.is_empty())?)
-                }
+                cx.one(property, value)
             }
-        },
-        |cx, c| {
-            let CandidateKind::Functional { value, .. } = c.kind else {
-                return None;
-            };
-            match value? {
-                UtilityValue::Arbitrary { data_type, value } => {
-                    let property = match arbitrary_type(
-                        data_type,
-                        value,
-                        &[
-                            DataType::Image,
-                            DataType::Color,
-                            DataType::Percentage,
-                            DataType::Position,
-                            DataType::BgSize,
-                            DataType::Length,
-                            DataType::Url,
-                        ],
-                    ) {
-                        Some("percentage" | "position") => "background-position",
-                        Some("bg-size" | "length" | "size") => "background-size",
-                        Some("image" | "url") => "background-image",
-                        _ => {
-                            let color = cx.as_color(value, None)?;
-                            return Some(Vec::from_iter_in([("background-color", color)], cx.alloc));
-                        }
-                    };
-                    Some(Vec::from_iter_in([(property, value)], cx.alloc))
+            UtilityValue::Named { value, .. } => {
+                if let Some(v) = cx.resolve_theme_color(value, modifier, &["--background-color", "--color"]) {
+                    return cx.one("background-color", v);
                 }
-                UtilityValue::Named { value, .. } => {
-                    if let Some(color) = cx.resolve_theme_color(value, None, &["--background-color", "--color"]) {
-                        return Some(Vec::from_iter_in([("background-color", color)], cx.alloc));
-                    }
-                    let image = cx.resolve(Some(value), &["--background-image"]).filter(|v| !v.is_empty())?;
-                    Some(Vec::from_iter_in([("background-image", image)], cx.alloc))
+                if modifier.is_some() {
+                    return None;
                 }
+                cx.one("background-image", cx.resolve(Some(value), &["--background-image"]).filter(|v| !v.is_empty())?)
             }
-        },
-    );
+        }
+    });
     r.suggest("bg", vec![Suggest::color(&["--background-color", "--color"]), Suggest::default().keys(&["--background-image"])]);
 
-    gradient_stop(
-        r,
-        "from",
-        |cx, v, stop| match stop {
-            Stop::Color => Some(cx.nodes([
-                gradient_stop_properties(cx),
-                cx.decl("--tw-sort", "--tw-gradient-from"),
-                cx.decl("--tw-gradient-from", v),
-                cx.decl("--tw-gradient-stops", GRADIENT_STOPS),
-            ])),
-            Stop::Position => Some(cx.nodes([gradient_stop_properties(cx), cx.decl("--tw-gradient-from-position", v)])),
-        },
-        |cx, v, stop| match stop {
-            Stop::Color => Vec::from_iter_in([("--tw-gradient-from", v), ("--tw-gradient-stops", GRADIENT_STOPS)], cx.alloc),
-            Stop::Position => Vec::from_iter_in([("--tw-gradient-from-position", v)], cx.alloc),
-        },
-    );
+    gradient_stop(r, "from", |cx, v, stop| match stop {
+        Stop::Color => Some(cx.nodes([
+            gradient_stop_properties(cx),
+            cx.decl("--tw-sort", "--tw-gradient-from"),
+            cx.decl("--tw-gradient-from", v),
+            cx.decl("--tw-gradient-stops", GRADIENT_STOPS),
+        ])),
+        Stop::Position => Some(cx.nodes([gradient_stop_properties(cx), cx.decl("--tw-gradient-from-position", v)])),
+    });
     r.static_decls("via-none", &[("--tw-gradient-via-stops", "initial")]);
-    gradient_stop(
-        r,
-        "via",
-        |cx, v, stop| match stop {
-            Stop::Color => Some(cx.nodes([
-                gradient_stop_properties(cx),
-                cx.decl("--tw-sort", "--tw-gradient-via"),
-                cx.decl("--tw-gradient-via", v),
-                cx.decl("--tw-gradient-via-stops", GRADIENT_VIA_STOPS),
-                cx.decl("--tw-gradient-stops", "var(--tw-gradient-via-stops)"),
-            ])),
-            Stop::Position => Some(cx.nodes([gradient_stop_properties(cx), cx.decl("--tw-gradient-via-position", v)])),
-        },
-        |cx, v, stop| match stop {
-            Stop::Color => Vec::from_iter_in(
-                [
-                    ("--tw-gradient-via", v),
-                    ("--tw-gradient-via-stops", GRADIENT_VIA_STOPS),
-                    ("--tw-gradient-stops", "var(--tw-gradient-via-stops)"),
-                ],
-                cx.alloc,
-            ),
-            Stop::Position => Vec::from_iter_in([("--tw-gradient-via-position", v)], cx.alloc),
-        },
-    );
-    gradient_stop(
-        r,
-        "to",
-        |cx, v, stop| match stop {
-            Stop::Color => Some(cx.nodes([
-                gradient_stop_properties(cx),
-                cx.decl("--tw-sort", "--tw-gradient-to"),
-                cx.decl("--tw-gradient-to", v),
-                cx.decl("--tw-gradient-stops", GRADIENT_STOPS),
-            ])),
-            Stop::Position => Some(cx.nodes([gradient_stop_properties(cx), cx.decl("--tw-gradient-to-position", v)])),
-        },
-        |cx, v, stop| match stop {
-            Stop::Color => Vec::from_iter_in([("--tw-gradient-to", v), ("--tw-gradient-stops", GRADIENT_STOPS)], cx.alloc),
-            Stop::Position => Vec::from_iter_in([("--tw-gradient-to-position", v)], cx.alloc),
-        },
-    );
+    gradient_stop(r, "via", |cx, v, stop| match stop {
+        Stop::Color => Some(cx.nodes([
+            gradient_stop_properties(cx),
+            cx.decl("--tw-sort", "--tw-gradient-via"),
+            cx.decl("--tw-gradient-via", v),
+            cx.decl("--tw-gradient-via-stops", GRADIENT_VIA_STOPS),
+            cx.decl("--tw-gradient-stops", "var(--tw-gradient-via-stops)"),
+        ])),
+        Stop::Position => Some(cx.nodes([gradient_stop_properties(cx), cx.decl("--tw-gradient-via-position", v)])),
+    });
+    gradient_stop(r, "to", |cx, v, stop| match stop {
+        Stop::Color => Some(cx.nodes([
+            gradient_stop_properties(cx),
+            cx.decl("--tw-sort", "--tw-gradient-to"),
+            cx.decl("--tw-gradient-to", v),
+            cx.decl("--tw-gradient-stops", GRADIENT_STOPS),
+        ])),
+        Stop::Position => Some(cx.nodes([gradient_stop_properties(cx), cx.decl("--tw-gradient-to-position", v)])),
+    });
 }

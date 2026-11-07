@@ -9,7 +9,8 @@ use orisu_ast::bytes::trim;
 
 const KEYWORDS: [&str; 5] = ["inset", "inherit", "initial", "revert", "unset"];
 const LENGTH_FUNCTIONS: [&str; 5] = ["calc", "clamp", "max", "min", "--spacing"];
-const COLOR_FUNCTIONS: [&str; 15] = [
+/// Wider than [`crate::infer::is_color`]'s list, as in Tailwind's `replaceShadowColors`.
+const SHADOW_COLOR_FUNCTIONS: [&str; 15] = [
     "color",
     "color-mix",
     "contrast-color",
@@ -31,7 +32,7 @@ fn is_one_of(list: &[&str], value: &str) -> bool {
     list.iter().any(|k| k.eq_ignore_ascii_case(value))
 }
 
-fn is_length(word: &str) -> bool {
+fn looks_like_length(word: &str) -> bool {
     let b = word.strip_prefix('-').unwrap_or(word).as_bytes();
     matches!(b, [b'0'..=b'9', ..] | [b'.', b'0'..=b'9', ..]) && !word.contains(['\r', '\u{2028}', '\u{2029}'])
 }
@@ -56,7 +57,7 @@ pub fn replace_shadow_colors<'a>(input: &str, alloc: &'a Allocator, replacement:
                     if is_one_of(&KEYWORDS, v) {
                         continue;
                     }
-                    if is_length(v) {
+                    if looks_like_length(v) {
                         lengths += 1;
                         continue;
                     }
@@ -68,7 +69,7 @@ pub fn replace_shadow_colors<'a>(input: &str, alloc: &'a Allocator, replacement:
                     unknowns += 1;
                 }
                 ValueNode::Function(name, _) => {
-                    if is_one_of(&COLOR_FUNCTIONS, name) {
+                    if is_one_of(&SHADOW_COLOR_FUNCTIONS, name) {
                         target = Some(idx);
                         break;
                     }

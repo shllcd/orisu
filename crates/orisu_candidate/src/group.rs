@@ -4,6 +4,7 @@
 //! Only `:` opens a group, since `-(…)` already means a CSS variable in Tailwind v4 (`p-(--gap)`).
 
 use memchr::{memchr, memmem};
+use orisu_ast::bytes::string_end;
 
 /// Expands every group in `input`, wherever it appears. Meant for candidate extraction, where
 /// expanding something that only looks like a group is harmless.
@@ -35,8 +36,8 @@ pub fn expand_in_strings(input: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            quote @ (b'\'' | b'"') => {
-                let end = string_end(bytes, i + 1, quote);
+            b'\'' | b'"' => {
+                let end = string_end(bytes, i).unwrap_or(bytes.len());
                 changed |= expand_region(bytes, i + 1..end, &mut copied, &mut out);
                 i = end + 1;
             }
@@ -92,17 +93,6 @@ fn template_text(
         }
     }
     *changed |= expand_region(bytes, start..bytes.len(), copied, out);
-    bytes.len()
-}
-
-fn string_end(bytes: &[u8], mut i: usize, quote: u8) -> usize {
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            b if b == quote => return i,
-            _ => i += 1,
-        }
-    }
     bytes.len()
 }
 

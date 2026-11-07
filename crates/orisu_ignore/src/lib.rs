@@ -1,47 +1,8 @@
 /*!
-The ignore crate provides a fast recursive directory iterator that respects
-various filters such as globs, file types and `.gitignore` files. The precise
-matching rules and precedence is explained in the documentation for
+A parallel recursive directory walker that respects `.gitignore`, `.ignore`
+and hidden-file rules, vendored from ripgrep's `ignore` crate and trimmed to
+what the scanner uses. Matching rules and precedence are documented on
 `WalkBuilder`.
-
-Secondarily, this crate exposes gitignore and file type matchers for use cases
-that demand more fine-grained control.
-
-# Example
-
-This example shows the most basic usage of this crate. This code will
-recursively traverse the current directory while automatically filtering out
-files and directories according to ignore globs found in files like
-`.ignore` and `.gitignore`:
-
-
-```rust,no_run
-use orisu_ignore::Walk;
-
-for result in Walk::new("./") {
-    // Each item yielded by the iterator is either a directory entry or an
-    // error, so either print the path or the error.
-    match result {
-        Ok(entry) => println!("{}", entry.path().display()),
-        Err(err) => println!("ERROR: {}", err),
-    }
-}
-```
-
-# Example: advanced
-
-By default, the recursive directory iterator will ignore hidden files and
-directories. This can be disabled by building the iterator with `WalkBuilder`:
-
-```rust,no_run
-use orisu_ignore::WalkBuilder;
-
-for result in WalkBuilder::new("./").hidden(false).build() {
-    println!("{:?}", result);
-}
-```
-
-See the documentation for `WalkBuilder` for many other options.
 */
 
 #![allow(clippy::all, reason = "vendored upstream code, kept close to ripgrep for easy syncing")]
@@ -49,16 +10,13 @@ See the documentation for `WalkBuilder` for many other options.
 
 use std::path::{Path, PathBuf};
 
-pub use crate::walk::{DirEntry, ParallelVisitor, ParallelVisitorBuilder, Walk, WalkBuilder, WalkParallel, WalkState};
+pub use crate::walk::{DirEntry, WalkBuilder, WalkState};
 
-mod default_types;
 mod dir;
 pub mod gitignore;
-pub mod overrides;
 mod pathutil;
 pub use crate::dir::git_exclude_files;
 pub use crate::pathutil::{is_normal_path, path_starts_with};
-pub mod types;
 mod walk;
 
 /// Represents an error that can occur when parsing a gitignore file.
@@ -111,10 +69,6 @@ pub enum Error {
         /// The underlying glob error as a string.
         err: String,
     },
-    /// A type selection for a file type that is not defined.
-    UnrecognizedFileType(String),
-    /// A user specified file type definition could not be parsed.
-    InvalidDefinition,
 }
 
 impl Clone for Error {
@@ -130,30 +84,13 @@ impl Clone for Error {
                 None => Error::Io(std::io::Error::new(err.kind(), err.to_string())),
             },
             Error::Glob { ref glob, ref err } => Error::Glob { glob: glob.clone(), err: err.clone() },
-            Error::UnrecognizedFileType(ref err) => Error::UnrecognizedFileType(err.clone()),
-            Error::InvalidDefinition => Error::InvalidDefinition,
         }
     }
 }
 
 impl Error {
-    /// Returns true if this is a partial error.
-    ///
-    /// A partial error occurs when only some operations failed while others
-    /// may have succeeded. For example, an ignore file may contain an invalid
-    /// glob among otherwise valid globs.
-    pub fn is_partial(&self) -> bool {
-        match *self {
-            Error::Partial(_) => true,
-            Error::WithLineNumber { ref err, .. } => err.is_partial(),
-            Error::WithPath { ref err, .. } => err.is_partial(),
-            Error::WithDepth { ref err, .. } => err.is_partial(),
-            _ => false,
-        }
-    }
-
     /// Returns true if this error is exclusively an I/O error.
-    pub fn is_io(&self) -> bool {
+    fn is_io(&self) -> bool {
         match *self {
             Error::Partial(ref errs) => errs.len() == 1 && errs[0].is_io(),
             Error::WithLineNumber { ref err, .. } => err.is_io(),
@@ -162,73 +99,6 @@ impl Error {
             Error::Loop { .. } => false,
             Error::Io(_) => true,
             Error::Glob { .. } => false,
-            Error::UnrecognizedFileType(_) => false,
-            Error::InvalidDefinition => false,
-        }
-    }
-
-    /// Inspect the original [`std::io::Error`] if there is one.
-    ///
-    /// [`None`] is returned if the [`Error`] doesn't correspond to an
-    /// [`std::io::Error`]. This might happen, for example, when the error was
-    /// produced because a cycle was found in the directory tree while
-    /// following symbolic links.
-    ///
-    /// This method returns a borrowed value that is bound to the lifetime of the [`Error`]. To
-    /// obtain an owned value, the [`into_io_error`] can be used instead.
-    ///
-    /// > This is the original [`std::io::Error`] and is _not_ the same as
-    /// > [`impl From<Error> for std::io::Error`][impl] which contains
-    /// > additional context about the error.
-    ///
-    /// [`None`]: https://doc.rust-lang.org/stable/std/option/enum.Option.html#variant.None
-    /// [`std::io::Error`]: https://doc.rust-lang.org/stable/std/io/struct.Error.html
-    /// [`From`]: https://doc.rust-lang.org/stable/std/convert/trait.From.html
-    /// [`Error`]: struct.Error.html
-    /// [`into_io_error`]: struct.Error.html#method.into_io_error
-    /// [impl]: struct.Error.html#impl-From%3CError%3E
-    pub fn io_error(&self) -> Option<&std::io::Error> {
-        match *self {
-            Error::Partial(ref errs) => {
-                if errs.len() == 1 {
-                    errs[0].io_error()
-                } else {
-                    None
-                }
-            }
-            Error::WithLineNumber { ref err, .. } => err.io_error(),
-            Error::WithPath { ref err, .. } => err.io_error(),
-            Error::WithDepth { ref err, .. } => err.io_error(),
-            Error::Loop { .. } => None,
-            Error::Io(ref err) => Some(err),
-            Error::Glob { .. } => None,
-            Error::UnrecognizedFileType(_) => None,
-            Error::InvalidDefinition => None,
-        }
-    }
-
-    /// Similar to [`io_error`] except consumes self to convert to the original
-    /// [`std::io::Error`] if one exists.
-    ///
-    /// [`io_error`]: struct.Error.html#method.io_error
-    /// [`std::io::Error`]: https://doc.rust-lang.org/stable/std/io/struct.Error.html
-    pub fn into_io_error(self) -> Option<std::io::Error> {
-        match self {
-            Error::Partial(mut errs) => {
-                if errs.len() == 1 {
-                    errs.remove(0).into_io_error()
-                } else {
-                    None
-                }
-            }
-            Error::WithLineNumber { err, .. } => err.into_io_error(),
-            Error::WithPath { err, .. } => err.into_io_error(),
-            Error::WithDepth { err, .. } => err.into_io_error(),
-            Error::Loop { .. } => None,
-            Error::Io(err) => Some(err),
-            Error::Glob { .. } => None,
-            Error::UnrecognizedFileType(_) => None,
-            Error::InvalidDefinition => None,
         }
     }
 
@@ -288,8 +158,6 @@ impl std::error::Error for Error {
             Error::Loop { .. } => "file system loop found",
             Error::Io(ref err) => err.description(),
             Error::Glob { ref err, .. } => err,
-            Error::UnrecognizedFileType(_) => "unrecognized file type",
-            Error::InvalidDefinition => "invalid definition",
         }
     }
 }
@@ -320,14 +188,6 @@ impl std::fmt::Display for Error {
             Error::Glob { glob: Some(ref glob), ref err } => {
                 write!(f, "error parsing glob '{}': {}", glob, err)
             }
-            Error::UnrecognizedFileType(ref ty) => {
-                write!(f, "unrecognized file type: {}", ty)
-            }
-            Error::InvalidDefinition => write!(
-                f,
-                "invalid definition (format is type:glob, e.g., \
-                           html:*.html)"
-            ),
         }
     }
 }
@@ -419,25 +279,6 @@ impl<T> Match<T> {
         }
     }
 
-    /// Inverts the match so that `Ignore` becomes `Whitelist` and
-    /// `Whitelist` becomes `Ignore`. A non-match remains the same.
-    pub fn invert(self) -> Match<T> {
-        match self {
-            Match::None => Match::None,
-            Match::Ignore(t) => Match::Whitelist(t),
-            Match::Whitelist(t) => Match::Ignore(t),
-        }
-    }
-
-    /// Return the value inside this match if it exists.
-    pub fn inner(&self) -> Option<&T> {
-        match *self {
-            Match::None => None,
-            Match::Ignore(ref t) => Some(t),
-            Match::Whitelist(ref t) => Some(t),
-        }
-    }
-
     /// Apply the given function to the value inside this match.
     ///
     /// If the match has no value, then return the match unchanged.
@@ -447,10 +288,5 @@ impl<T> Match<T> {
             Match::Ignore(t) => Match::Ignore(f(t)),
             Match::Whitelist(t) => Match::Whitelist(f(t)),
         }
-    }
-
-    /// Return the match if it is not none. Otherwise, return other.
-    pub fn or(self, other: Self) -> Self {
-        if self.is_none() { other } else { self }
     }
 }

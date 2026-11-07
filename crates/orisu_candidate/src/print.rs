@@ -1,16 +1,12 @@
 // Portions ported from Tailwind CSS (https://github.com/tailwindlabs/tailwindcss),
 // MIT License, Copyright (c) Tailwind Labs, Inc.
 
-use crate::parse::{Candidate, CandidateKind, Modifier, UtilityValue, Variant, VariantValue};
+use crate::parse::{Candidate, CandidateKind, Modifier, ROOT_WITHOUT_DASH, UtilityValue, Variant, VariantValue, unwrap_var};
 use orisu_allocator::Allocator;
+use orisu_parser::decode::is_url_fn;
 use orisu_parser::value::{self as vp, ValueNode};
 
-pub fn print_candidate(candidate: &Candidate<'_>, prefix: Option<&str>) -> String {
-    print_candidate_with(candidate, prefix, &Allocator::new())
-}
-
-/// [`print_candidate`] with the arena the value parsing borrows from.
-pub fn print_candidate_with(candidate: &Candidate<'_>, prefix: Option<&str>, alloc: &Allocator) -> String {
+pub fn print_candidate(candidate: &Candidate<'_>, prefix: Option<&str>, alloc: &Allocator) -> String {
     let mut out = String::new();
     if let Some(prefix) = prefix.filter(|p| !p.is_empty()) {
         out.push_str(prefix);
@@ -59,23 +55,13 @@ pub fn print_candidate_with(candidate: &Candidate<'_>, prefix: Option<&str>, all
     out
 }
 
-pub fn print_variant(variant: &Variant<'_>) -> String {
-    print_variant_with(variant, &Allocator::new())
-}
-
-/// [`print_variant`] with the arena the value parsing borrows from.
-pub fn print_variant_with(variant: &Variant<'_>, alloc: &Allocator) -> String {
+pub fn print_variant(variant: &Variant<'_>, alloc: &Allocator) -> String {
     let mut out = String::new();
     write_variant(variant, &mut out, alloc);
     out
 }
 
-pub fn print_modifier(modifier: Modifier<'_>) -> String {
-    print_modifier_with(modifier, &Allocator::new())
-}
-
-/// [`print_modifier`] with the arena the value parsing borrows from.
-pub fn print_modifier_with(modifier: Modifier<'_>, alloc: &Allocator) -> String {
+pub fn print_modifier(modifier: Modifier<'_>, alloc: &Allocator) -> String {
     let mut out = String::new();
     write_modifier(Some(modifier), &mut out, alloc);
     out
@@ -91,7 +77,7 @@ fn write_variant(variant: &Variant<'_>, out: &mut String, alloc: &Allocator) {
         }
         Variant::Functional { root, value, modifier } => {
             out.push_str(root);
-            let dash = if root == "@" { "" } else { "-" };
+            let dash = if root == ROOT_WITHOUT_DASH { "" } else { "-" };
             match value {
                 Some(VariantValue::Arbitrary(value)) => {
                     let (open, close, value) = bracketed(value, alloc);
@@ -136,7 +122,7 @@ fn write_modifier(modifier: Option<Modifier<'_>>, out: &mut String, alloc: &Allo
 
 fn bracketed<'v>(value: &'v str, alloc: &Allocator) -> (char, char, &'v str) {
     let ast = vp::parse(value, alloc);
-    if matches!(ast.as_slice(), [ValueNode::Function("var", _)]) { ('(', ')', &value[4..value.len() - 1]) } else { ('[', ']', value) }
+    if matches!(ast.as_slice(), [ValueNode::Function("var", _)]) { ('(', ')', unwrap_var(value)) } else { ('[', ']', value) }
 }
 
 fn simplify_arbitrary_variant<'v>(input: &'v str, alloc: &'v Allocator) -> &'v str {
@@ -223,8 +209,7 @@ fn write_value(nodes: &[ValueNode<'_>], out: &mut String, normalize: bool, escap
                     out.push_str(name);
                 }
                 out.push('(');
-                let is_url = *name == "url" || name.ends_with("_url");
-                write_value(children, out, normalize && !wrap, escape && !is_url);
+                write_value(children, out, normalize && !wrap, escape && !is_url_fn(name));
                 out.push(')');
                 if wrap {
                     out.push(')');
