@@ -11,30 +11,27 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ### Changed
 
-- The mangler and the linter share one list of class attributes: the mangler now also reads `ngClass`, `[ngClass]`, `class:list`, `:class`, `v-bind:class` and `[class]`, and the language server also lints `*ClassName` attributes.
-- A document outside every project directory gets a project only from its own workspace folder, and a non-file document gets none, instead of an arbitrary project.
-- The language server takes incremental document changes and scans a document once per change, sharing the class regions between hover, completion, colors, code actions and diagnostics. Completion items are prepared once per project, and stylesheets are discovered in parallel. On the shadcn/ui `sidebar.tsx`, hover takes 122k instructions instead of 952k, completion 4.3M instead of 7.4M, colors 1.1M instead of 2.8M and diagnostics 2.3M instead of 3.4M; startup takes 52 ms instead of 58 ms.
-- CSS `@import` resolution lives in Rust and is shared by Node and the language server. It tries a package's `exports` conditions in the package's own order, also searches `NODE_PATH`, and treats an unreadable `package.json` as missing instead of throwing.
-- Every CLI subcommand's `--help` lists options in one format, with their defaults.
+- The mangler also reads `ngClass`, `[ngClass]`, `class:list`, `:class`, `v-bind:class` and `[class]`; the language server also lints `*ClassName` attributes.
 - `check` and the language server lint `classNames(…)` calls by default.
-- The language server treats a stylesheet as a Tailwind entry only when it imports a Tailwind stylesheet (`@import "tailwindcss"` and its parts) or has `@tailwind utilities`, no longer matching packages like `tailwindcss-animate` by name. A file outside every project uses the project sharing the most parent directories with it.
+- The language server is faster: hover ~8×, colors ~2.5×, completion and diagnostics ~1.5×.
+- `@import` resolution follows the package's `exports` condition order and searches `NODE_PATH`.
+- CLI `--help` lists options in one format, with defaults.
+- The language server detects Tailwind stylesheets by their imports, not by package name, and picks a better project for files outside every project.
 
 ### Fixed
 
-- The Vite plugin's `mangle` no longer fails when other stylesheets use Tailwind without emitting utilities, like component files with `@reference "tailwindcss"`; it renames the stylesheet with utilities and checks the others for clashes.
-- The scanner and the language server no longer crash on a tag ending in an unterminated quoted attribute, and the language server reads unquoted attributify values like `bg=red-500`, as the scanner does.
-- The language server reports a `configFile` setting of the wrong type instead of ignoring it, and `compile` rejects `polyfills` beyond 8 bits instead of truncating them.
-- The Vite plugin rejects a malformed saved mangle plan (odd `names`, mismatched `keys`/`values`, missing `namePrefix`) with an error instead of silently using it, and fills placeholders natively when no plan is saved.
-- The language server reports the package version instead of `0.1.0`.
-- An invalid language server setting is reported and ignored on its own instead of silently resetting every other setting.
-- The Vite plugin fails with a clear message when the saved mangle plan cannot be read, instead of building as if there was none; only a missing plan or output file is ignored.
-- `mangle` fails the build when a scanned file cannot be read, instead of treating it as empty and renaming the classes it uses.
-- `mangleModule` expands variant groups itself when `variantGroups` is on, so hosts other than the Vite plugin get placeholders for the expanded classes.
-- `ManglePlan.checkModule` rejects an unknown class fragment kind instead of reading it as `infix`.
-- Listing the scanner's files or globs before the first scan no longer makes that scan return no candidates.
-- An invalid `@source not` pattern is skipped instead of crashing the scan.
-- Auto source detection no longer emits a bogus glob for package manifests.
-- The language server skips every ignored content directory (`node_modules`, `.git`, build output and the like) when looking for stylesheets, not just `node_modules`.
+- Vite `mangle` failing when other stylesheets use `@reference "tailwindcss"`.
+- Crash on a tag ending in an unterminated quoted attribute; unquoted attributify values like `bg=red-500` in the language server.
+- Invalid language server settings resetting all other settings; a wrongly typed `configFile` being ignored.
+- `compile` accepting `polyfills` beyond 8 bits.
+- Vite plugin accepting a malformed or unreadable saved mangle plan.
+- `mangle` treating an unreadable scanned file as empty.
+- `mangleModule` ignoring `variantGroups`.
+- `ManglePlan.checkModule` accepting an unknown fragment kind.
+- Scan returning no candidates after listing files or globs first.
+- Crash on an invalid `@source not` pattern.
+- Bogus glob for package manifests in auto source detection.
+- The language server reporting version `0.1.0`, and searching ignored directories other than `node_modules` for stylesheets.
 
 ## [0.4.0] - 2026-11-04
 
