@@ -52,5 +52,3 @@ jobs:
       binding-name: '@orisu/binding-{platform}'
       zig-version: 0.15.2
       build-command: npm install --ignore-scripts && npm run build
-      version-files: |
-        packages/orisu/src/cli.ts:const VERSION = "([^"]*)";
