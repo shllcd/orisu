@@ -9,6 +9,8 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-08
+
 ### Changed
 
 - The mangler also reads `ngClass`, `[ngClass]`, `class:list`, `:class`, `v-bind:class` and `[class]`; the language server also lints `*ClassName` attributes.
