@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 orisu_allocator.workspace = true
-orisu_analyze.workspace = true
 orisu_ast.workspace = true
 orisu_parser.workspace = true
 orisu_compiler.workspace = true

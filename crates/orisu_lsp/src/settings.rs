@@ -3,6 +3,15 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::path::PathBuf;
 
+/// Functions whose arguments are class lists.
+pub const CLASS_FUNCTIONS: &[&str] = &["cn", "clsx", "cx", "classnames", "classNames", "twMerge", "twJoin"];
+
+/// Attributes and properties whose values are class lists.
+pub const CLASS_ATTRIBUTES: &[&str] = &["class", "className", "ngClass", "[ngClass]", "class:list", ":class", "v-bind:class", "[class]"];
+
+/// The ending of attributes and properties that also hold class lists, like `buttonClassName`.
+pub const CLASS_ATTRIBUTE_SUFFIX: &str = "ClassName";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
@@ -43,15 +52,15 @@ pub struct Settings {
     pub config_file: Vec<PathBuf>,
 }
 
-/// Class functions linted besides those the mangler renames in: variant libraries, whose class lists it cannot rename.
+/// Class functions linted besides [`CLASS_FUNCTIONS`]: variant libraries, whose arguments are class lists too.
 const VARIANT_FUNCTIONS: &[&str] = &["cva", "tv", "tw"];
 
 impl Default for Settings {
     fn default() -> Self {
         let strings = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
         Self {
-            class_attributes: strings(orisu_analyze::DEFAULT_CLASS_ATTRIBUTES),
-            class_functions: orisu_analyze::DEFAULT_CLASS_FUNCTIONS.iter().chain(VARIANT_FUNCTIONS).map(|s| (*s).to_owned()).collect(),
+            class_attributes: strings(CLASS_ATTRIBUTES),
+            class_functions: CLASS_FUNCTIONS.iter().chain(VARIANT_FUNCTIONS).map(|s| (*s).to_owned()).collect(),
             root_font_size: 16.0,
             lint: Lint::default(),
             config_file: Vec::new(),

@@ -2,8 +2,8 @@
 //! `@apply` and, with `@attributify`, utility attributes.
 
 use crate::document::Language;
+use crate::settings::CLASS_ATTRIBUTE_SUFFIX;
 use memchr::memmem;
-use orisu_analyze::CLASS_ATTRIBUTE_SUFFIX;
 use orisu_candidate::attributify::{Attribute, Attributify, Value, attributes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

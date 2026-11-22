@@ -83,12 +83,6 @@ fn merge_keys() -> String {
         let _ = writeln!(out, "  {variant:?},");
     }
     out.push_str("]);\n");
-    let alphabet = std::str::from_utf8(orisu_mangle::names::ALPHABET).expect("the alphabet is ASCII");
-    let _ = write!(
-        out,
-        "\n/** The characters of short names, from `orisu_mangle::names::ALPHABET`; the first {first} can start one. */\nexport const NAME_ALPHABET = {alphabet:?};\nexport const NAME_FIRST = {first};\n",
-        first = orisu_mangle::names::FIRST,
-    );
     out
 }
 

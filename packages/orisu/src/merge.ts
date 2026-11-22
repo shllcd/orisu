@@ -1,7 +1,7 @@
 // Caching strategy adapted from shadcn-ui/cn (https://github.com/shadcn-ui/cn),
 // MIT License, Copyright (c) 2026 shadcn.
 
-import { NAME_ALPHABET, NAME_FIRST, ORDER_SENSITIVE } from "./merge-keys.ts";
+import { ORDER_SENSITIVE } from "./merge-keys.ts";
 
 const CACHE_SIZE = 8192;
 const PARSED_SIZE = 32768;
@@ -41,66 +41,13 @@ let doorBase = 0;
 let doorEpoch = 1;
 let doorMarks = 0;
 
-/** Short names in the order `encodeMergeTable` writes them; see `NameTable` for the fields. */
-export interface NameTableSource {
-  prefix: string;
-  /** Space-separated. */
-  groups: string;
-  opaque: number;
-  /** `group:shape,delta,…` runs joined by `;`, base 36, an empty delta for 0. */
-  runs: string;
-  /** Base-36 deltas, the first from -1. */
-  holes: string;
-}
-
 export interface MergeTableSource {
   prefix?: string | null;
   keys: string;
   values: string;
   erases: readonly (readonly number[])[];
   alias: string;
-  names?: NameTableSource | null;
 }
-
-/** The `k`-th short name, as `orisu_mangle::names::name` makes it. */
-const shortName = (k: number): string => {
-  const rest = NAME_ALPHABET.length;
-  let count = NAME_FIRST;
-  let length = 1;
-  while (k >= count) {
-    k -= count;
-    count *= rest;
-    length++;
-  }
-  let out = "";
-  for (let i = 1; i < length; i++) {
-    out = NAME_ALPHABET[k % rest] + out;
-    k = Math.floor(k / rest);
-  }
-  return NAME_ALPHABET[k] + out;
-};
-
-const parseDeltas = (parts: string[], start: number): number[] => {
-  let value = start;
-  return parts.map((delta) => (value += delta === "" ? 0 : parseInt(delta, 36)));
-};
-
-const registerNames = (names: NameTableSource, alias: readonly string[]): void => {
-  const shared = names.groups === "" ? [] : names.groups.split(" ");
-  for (const group of shared) groups.set(group, groups.size);
-  nextGroup = groups.size + names.opaque;
-  const holes = new Set(names.holes === "" ? [] : parseDeltas(names.holes.split(","), -1));
-  let k = 0;
-  if (names.runs === "") return;
-  for (const run of names.runs.split(";")) {
-    const colon = run.indexOf(":");
-    const group = parseInt(run.slice(0, colon), 36);
-    for (const shape of parseDeltas(run.slice(colon + 1).split(","), 0)) {
-      while (holes.has(k)) k++;
-      entries.set(names.prefix + shortName(k++), { group, shape, erases: erasures[+alias[shape]!]! });
-    }
-  }
-};
 
 /** Installs the shape table `encodeMergeTable` writes; classes missing from it are never merged away. */
 export const registerMergeTable = (table: MergeTableSource): void => {
@@ -121,7 +68,6 @@ export const registerMergeTable = (table: MergeTableSource): void => {
   }
   groups = new Map([["", 0]]);
   nextGroup = 1;
-  if (table.names) registerNames(table.names, alias);
   stamps = new Int32Array(0);
   parsed = new Map();
   prevParsed = new Map();

@@ -15,7 +15,6 @@ use orisu_theme::Inline;
 use std::path::PathBuf;
 use utf16::IndexConverter;
 
-pub mod mangle;
 mod utf16;
 
 #[derive(Debug, Clone)]
@@ -217,7 +216,6 @@ pub struct MergeTable {
     pub keys: Vec<String>,
     pub values: Vec<u32>,
     pub erases: Vec<Vec<u32>>,
-    pub names: Option<mangle::NameTable>,
 }
 
 #[napi]
@@ -406,8 +404,8 @@ impl Compiler {
     #[napi]
     pub fn merge_table(&mut self, classes: Vec<String>) -> MergeTable {
         self.0.with_mut(|c| {
-            let orisu_merge::MergeTable { keys, values, erases } = Merger::new(c.session()).table(classes.iter().map(String::as_str)).0;
-            MergeTable { prefix: c.design_system.theme.prefix().map(str::to_owned), keys, values, erases, names: None }
+            let orisu_merge::MergeTable { keys, values, erases } = Merger::new(c.session()).table(classes.iter().map(String::as_str));
+            MergeTable { prefix: c.design_system.theme.prefix().map(str::to_owned), keys, values, erases }
         })
     }
 }

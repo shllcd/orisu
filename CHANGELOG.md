@@ -9,6 +9,10 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+### Removed
+
+- Removed `mangle` option of the Vite plugin.
+
 ## [0.5.0] - 2026-11-08
 
 ### Changed

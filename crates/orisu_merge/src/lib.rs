@@ -3,7 +3,7 @@ use orisu_ast::Node;
 use orisu_compiler::compile::compile_candidates;
 use orisu_compiler::design_system::Session;
 use orisu_parser::segment::segment;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 const SIDES: [&str; 4] = ["bs", "ie", "be", "is"];
 const CORNERS: [&str; 4] = ["ss", "se", "ee", "es"];
@@ -147,13 +147,6 @@ struct Split<'c> {
     variants: String,
     important: bool,
     base: &'c str,
-}
-
-impl Split<'_> {
-    /// The variants the class merges within, written as the JS `cn` runtime keys them.
-    fn group(self) -> String {
-        if self.important { format!("!{}", self.variants) } else { self.variants }
-    }
 }
 
 fn split_class<'c>(raw: &'c str, prefix: Option<&str>) -> Split<'c> {
@@ -325,13 +318,6 @@ impl<'s, 'a> Merger<'s, 'a> {
         id
     }
 
-    /// The variants `class` merges within, written as the JS `cn` runtime keys them, and its shape.
-    pub fn class_shape(&mut self, class: &str) -> (String, Option<u32>) {
-        let split = split_class(class, self.ds.theme.prefix());
-        let shape = self.shape(split.base);
-        (split.group(), shape)
-    }
-
     pub fn merge<'c>(&mut self, classes: impl IntoIterator<Item = &'c str>) -> String {
         let classes: Vec<&str> = classes.into_iter().flat_map(str::split_ascii_whitespace).collect();
         let mut later: FxHashMap<(String, bool), Vec<u32>> = FxHashMap::default();
@@ -360,16 +346,13 @@ impl<'s, 'a> Merger<'s, 'a> {
         out
     }
 
-    /// Shape table for the given classes, keyed by utility base, for the JS `cn` runtime, and the groups of the classes
-    /// that have a shape.
-    pub fn table<'c>(&mut self, classes: impl IntoIterator<Item = &'c str>) -> (MergeTable, FxHashSet<String>) {
+    /// Shape table for the given classes, keyed by utility base, for the JS `cn` runtime.
+    pub fn table<'c>(&mut self, classes: impl IntoIterator<Item = &'c str>) -> MergeTable {
         let mut entries: IndexMap<String, u32, FxBuildHasher> = IndexMap::default();
-        let mut groups = FxHashSet::default();
         for class in classes {
             let split = split_class(class, self.ds.theme.prefix());
             let Some(id) = self.shape(split.base) else { continue };
             entries.entry(split.base.to_owned()).or_insert(id);
-            groups.insert(split.group());
         }
         let shapes = &self.shapes;
         let erases = shapes
@@ -377,7 +360,7 @@ impl<'s, 'a> Merger<'s, 'a> {
             .map(|later| shapes.iter().enumerate().filter(|(_, earlier)| later.erases(earlier)).map(|(i, _)| i as u32).collect())
             .collect();
         let (keys, values) = entries.into_iter().unzip();
-        (MergeTable { keys, values, erases }, groups)
+        MergeTable { keys, values, erases }
     }
 }
 
