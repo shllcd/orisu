@@ -33,7 +33,7 @@ struct Sample {
     heap: i64,
 }
 
-/// Compares orisu with Tailwind 4.3.4 on a real project, shadcn/ui docs at a pinned commit by default. Requires both to produce
+/// Compares orisu with Tailwind 4.3.5 on a real project, shadcn/ui docs at a pinned commit by default. Requires both to produce
 /// the same candidates and CSS, then prints instructions per iteration as `min(setup + K iterations) - min(setup)` over `--runs`.
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut entry = None;

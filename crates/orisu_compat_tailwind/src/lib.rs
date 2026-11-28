@@ -15,9 +15,9 @@ use orisu_theme::Theme;
 
 pub use owned::OwnedCompiler;
 
-const BANNER: &str = "! tailwindcss v4.3.4 | MIT License | https://tailwindcss.com ";
+const BANNER: &str = "! tailwindcss v4.3.5 | MIT License | https://tailwindcss.com ";
 
-/// Tailwind CSS 4.3.4 on top of the orisu compiler.
+/// Tailwind CSS 4.3.5 on top of the orisu compiler.
 pub struct Tailwind;
 
 impl<'a> Extension<'a> for Tailwind {

@@ -137,6 +137,10 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
     while i < len {
         let ch = bytes[i];
         if !SPECIAL.has(ch) {
+            if ch == b'<' && at(i + 1) == b'!' && at(i + 2) == b'-' && at(i + 3) == b'-' && stack.is_empty() && buf.is_empty() {
+                i += 4;
+                continue;
+            }
             let end = SPECIAL.find(bytes, i).unwrap_or(len);
             buf.push_range(i, end);
             i = end;
@@ -169,6 +173,9 @@ pub fn parse<'a>(input: &'a str, alloc: &'a Allocator) -> Result<Nodes<'a>, CssS
                 if !buf.is_empty() && !matches!(buf.last(), Some(b' ' | b'\n' | b'\t')) {
                     buf.push_space();
                 }
+            }
+            b'-' if at(i + 1) == b'-' && at(i + 2) == b'>' && stack.is_empty() && buf.is_empty() => {
+                i += 2;
             }
             b'-' if at(i + 1) == b'-' && buf.is_empty() => {
                 let mut nested: SmallVec<[u8; 16]> = SmallVec::new();

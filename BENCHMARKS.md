@@ -1,6 +1,6 @@
 # Benchmarks
 
-orisu vs Tailwind 4.3.4 on the [shadcn/ui](https://github.com/shadcn-ui/ui) docs at a pinned commit: 4893 files,
+orisu vs Tailwind 4.3.5 on the [shadcn/ui](https://github.com/shadcn-ui/ui) docs at a pinned commit: 4893 files,
 18861 candidates, 512 KB of CSS. Before measuring, the bench checks that both find the same candidates and produce
 byte-identical CSS. Apple M3, Node 26.
 
@@ -15,21 +15,21 @@ are more stable than wall time. Memory is the process's peak RSS, Node included.
 
 | Scenario               | Instructions, Tailwind |  orisu |       | Time, Tailwind |   orisu |       | Memory, Tailwind |    orisu |      |
 | ---------------------- | ---------------------: | -----: | ----: | -------------: | ------: | ----: | ---------------: | -------: | ---: |
-| compile                |                 282.8M |  30.3M |  9.3× |         9.0 ms |  1.7 ms |  5.3× |         108.7 MB |  74.1 MB | 1.5× |
-| scan                   |                  4.76G |  3.35G |  1.4× |       133.6 ms | 72.4 ms |  1.8× |         146.1 MB | 106.8 MB | 1.4× |
-| scan, cached           |                        | 355.9M |       |                | 16.7 ms |       |                  | 157.8 MB |      |
-| build                  |                  1.78G | 172.5M | 10.3× |        66.9 ms | 12.7 ms |  5.3× |         240.3 MB | 165.5 MB | 1.5× |
-| cold start             |                  7.17G |  3.56G |  2.0× |       222.0 ms | 88.2 ms |  2.5× |         244.4 MB | 125.9 MB | 1.9× |
-| HMR                    |                 345.3M |  16.7M | 20.7× |        17.9 ms |  1.1 ms | 16.3× |         311.1 MB | 110.8 MB | 2.8× |
-| HMR, no new class      |                   4.7M |   3.4M |  1.4× |         149 µs |  140 µs |  1.1× |         175.4 MB |  98.1 MB | 1.8× |
-| canonicalize, cold     |                 24.52G |  1.21G | 20.2× |      1145.1 ms | 27.7 ms | 41.3× |         963.6 MB | 112.5 MB | 8.6× |
-| canonicalize, warm     |                  95.7M |   1.3M | 72.8× |         4.0 ms |   68 µs | 58.8× |         467.6 MB |  86.5 MB | 5.4× |
+| compile                |                 267.3M |  26.5M | 10.1× |         9.0 ms |  1.6 ms |  5.6× |         105.0 MB |  72.4 MB | 1.5× |
+| scan                   |                  4.76G |  3.27G |  1.5× |       145.1 ms | 70.2 ms |  2.1× |         146.3 MB | 106.9 MB | 1.4× |
+| scan, cached           |                        | 348.8M |       |                | 16.4 ms |       |                  | 155.1 MB |      |
+| build                  |                  1.80G | 169.9M | 10.6× |        67.5 ms | 12.6 ms |  5.4× |         239.3 MB | 163.3 MB | 1.5× |
+| cold start             |                  7.17G |  3.48G |  2.1× |       225.9 ms | 86.0 ms |  2.6× |         231.6 MB | 146.8 MB | 1.6× |
+| HMR                    |                 343.4M |  14.2M | 24.2× |        17.7 ms |  797 µs | 22.2× |         313.9 MB | 110.8 MB | 2.8× |
+| HMR, no new class      |                   4.9M | 295.9k | 16.6× |       141.6 µs | 12.7 µs | 11.1× |         172.4 MB |  97.4 MB | 1.8× |
+| canonicalize, cold     |                 24.01G |  1.20G | 20.0× |      1087.3 ms | 27.3 ms | 39.8× |         885.0 MB | 129.2 MB | 6.8× |
+| canonicalize, warm     |                  81.5M |   1.2M | 67.9× |         3.6 ms | 66.4 µs | 54.2× |         465.4 MB |  97.2 MB | 4.8× |
 
 Tailwind has no scan cache, so `scan, cached` has no counterpart.
 
 ## Language server
 
-`orisu-lsp` against `@tailwindcss/language-server` 0.16.0 with the project's Tailwind 4.3.4, both driven over stdio by the
+`orisu-lsp` against `@tailwindcss/language-server` 0.16.0 with the project's Tailwind 4.3.5, both driven over stdio by the
 same client on the same project. Requests target `registry/new-york-v4/ui/sidebar.tsx`.
 
 ```sh
@@ -38,12 +38,12 @@ cargo xtask bench-lsp [scenario...]
 
 | Scenario           | Instructions, Tailwind |  orisu |        | Time, Tailwind |   orisu |       | Memory, Tailwind |   orisu |      |
 | ------------------ | ---------------------: | -----: | -----: | -------------: | ------: | ----: | ---------------: | ------: | ---: |
-| startup            |                 47.42G |  2.34G |  20.3× |      2646.0 ms | 52.0 ms | 50.9× |         619.4 MB | 72.8 MB | 8.5× |
-| completion         |                 404.4M |   4.3M |  95.0× |        28.9 ms |  1.1 ms | 25.9× |         675.6 MB | 75.1 MB | 9.0× |
-| completion resolve |                   1.4M | 128.2k |  10.6× |         180 µs |   94 µs |  1.9× |         628.0 MB | 74.3 MB | 8.5× |
-| hover              |                  65.5M | 122.3k | 535.6× |         2.6 ms |  111 µs | 23.6× |         630.3 MB | 71.0 MB | 8.9× |
-| diagnostics        |                 172.2M |   2.3M |  74.0× |        11.8 ms |  865 µs | 13.6× |         619.0 MB | 73.2 MB | 8.5× |
-| colors             |                  66.0M |   1.1M |  60.5× |         3.3 ms |  351 µs |  9.4× |         630.8 MB | 72.8 MB | 8.7× |
+| startup            |                 46.92G |  2.30G |  20.4× |      2578.7 ms | 51.2 ms | 50.4× |         621.2 MB | 87.6 MB | 7.1× |
+| completion         |                 502.5M |   4.0M | 125.6× |        29.3 ms |  508 µs | 57.7× |         659.5 MB | 86.9 MB | 7.6× |
+| completion resolve |                 593.2k |  96.3k |   6.2× |       118.3 µs | 43.9 µs |  2.7× |         509.6 MB | 85.0 MB | 6.0× |
+| hover              |                  55.2M | 99.7k | 553.7× |         2.8 ms | 29.6 µs | 94.7× |         547.0 MB | 85.7 MB | 6.4× |
+| diagnostics        |                 204.5M |   2.1M |  97.4× |        12.8 ms |  477 µs | 26.8× |         530.5 MB | 87.8 MB | 6.0× |
+| colors             |                  64.5M |   1.0M |  64.5× |         3.6 ms |  299 µs | 12.0× |         618.4 MB | 86.8 MB | 7.1× |
 
 Instructions and memory are the server process's own; time is the client's wait, response parsing included. `startup`
 runs from spawning the server to the first non-empty completion list and counts the whole session; the other rows are
@@ -63,13 +63,13 @@ shadcn/ui `cn`) and [`cn`](https://github.com/shadcn-ui/cn) 0.2.6.
 
 |                              | clsx + tailwind-merge |      cn | orisu/cn |
 | ---------------------------- | --------------------: | ------: | -------: |
-| Instructions per call        |                 34.7k |   13.8k |    10.5k |
+| Instructions per call        |                 34.6k |   13.9k |     9.8k |
 | Time per call                |               1.48 µs | 0.51 µs |  0.26 µs |
-| Instructions, each call once |                136.5M |  227.7M |   103.0M |
+| Instructions, each call once |                133.7M |  224.0M |   102.3M |
 | Time, each call once         |                5.2 ms |  7.4 ms |   3.2 ms |
-| Retained JS heap             |                1.4 MB |  881 KB |   809 KB |
-| Bundle, minified             |               27.1 KB | 25.4 KB |  37.2 KB |
-| Bundle, gzip                 |                8.5 KB | 10.4 KB |  14.4 KB |
+| Retained JS heap             |                1.3 MB |  615 KB |   594 KB |
+| Bundle, minified             |               27.1 KB | 25.4 KB |  36.5 KB |
+| Bundle, gzip                 |                8.5 KB | 10.4 KB |  14.1 KB |
 
 "Per call" repeats the calls 20000 times, so caches are warm. "Each call once" is the first render: no cache hits.
 Retained heap is measured after the warm run and includes caches and the merge table.

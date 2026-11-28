@@ -1,6 +1,6 @@
 [package]
 name = "orisu_compat_tailwind"
-description = "Tailwind CSS 4.3.4 compatibility: built-in stylesheets, legacy utilities, v3 `theme()` paths, Node-style `@import` resolution and an owned compiler."
+description = "Tailwind CSS 4.3.5 compatibility: built-in stylesheets, legacy utilities, v3 `theme()` paths, Node-style `@import` resolution and an owned compiler."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

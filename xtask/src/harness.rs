@@ -10,15 +10,15 @@ const DEPENDENCIES: &str = r#"{
   "private": true,
   "dependencies": {
     "@tailwindcss/language-server": "0.16.0",
-    "@tailwindcss/node": "4.3.4",
-    "@tailwindcss/oxide": "4.3.4",
+    "@tailwindcss/node": "4.3.5",
+    "@tailwindcss/oxide": "4.3.5",
     "clsx": "2.1.1",
     "cn": "0.2.6",
     "esbuild": "0.28.2",
     "shadcn": "4.22.1",
     "streamdown": "2.7.0",
     "tailwind-merge": "3.7.0",
-    "tailwindcss": "4.3.4",
+    "tailwindcss": "4.3.5",
     "tw-animate-css": "1.4.0"
   }
 }

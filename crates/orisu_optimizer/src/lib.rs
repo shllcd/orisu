@@ -570,6 +570,41 @@ fn color_mix_fallback<'a, 'th: 'a>(value: &'a str, theme: &Theme<'th>, alloc: &'
     requires.then(|| vp::to_css(&ast, alloc))
 }
 
+/// Replaces the comments in `css` with a space: the value parser turns the commas inside them into separators.
+fn strip_comments<'a>(css: &'a str, alloc: &'a Allocator) -> &'a str {
+    let mut out = ArenaString::with_capacity_in(css.len(), alloc);
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find("*/") {
+            Some(end) => {
+                out.push(' ');
+                rest = &rest[start + 2 + end + 2..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.into_bump_str()
+}
+
+/// Whether `args` starts with a color interpolation method such as `in oklab,`. Without one the node after
+/// the first `,` is the second color, and Lightning CSS does not compute the fallback either.
+fn has_interpolation_method(args: &str) -> bool {
+    let args = args.trim_start();
+    matches!(args.get(..2), Some(prefix) if prefix.eq_ignore_ascii_case("in")) && args[2..].starts_with(char::is_whitespace)
+}
+
+/// The color space after `in`, which is not necessarily the third node when there is leading whitespace.
+fn colorspace<'a, 'b>(children: &'b mut orisu_allocator::Vec<'a, ValueNode<'a>>) -> Option<&'b mut ValueNode<'a>> {
+    let index = children.iter().position(|n| !matches!(n, ValueNode::Separator(_)))? + 2;
+    children.get_mut(index)
+}
+
 fn polyfill_nodes<'a, 'th: 'a>(
     nodes: &mut orisu_allocator::Vec<'a, ValueNode<'a>>,
     theme: &Theme<'th>,
@@ -581,20 +616,30 @@ fn polyfill_nodes<'a, 'th: 'a>(
         let mut replacement = None;
         match &mut nodes[i] {
             ValueNode::Function(name, children) if *name == "color-mix" => {
-                let mut unresolvable = false;
-                let mut current_color = false;
-                inline_vars(children, theme, requires, &mut unresolvable, &mut current_color, alloc);
-                if unresolvable || current_color {
-                    if let Some(sep) = children.iter().position(|n| matches!(n, ValueNode::Separator(v) if v.trim().contains(',')))
-                        && let Some(first) = children.get(sep + 1)
+                let raw = vp::to_css(children, alloc);
+                let args = if raw.contains("/*") {
+                    let stripped = strip_comments(raw, alloc);
+                    *children = vp::parse_in(stripped, alloc);
+                    stripped
+                } else {
+                    raw
+                };
+                if has_interpolation_method(args) {
+                    let mut unresolvable = false;
+                    let mut current_color = false;
+                    inline_vars(children, theme, requires, &mut unresolvable, &mut current_color, alloc);
+                    if unresolvable || current_color {
+                        if let Some(sep) = children.iter().position(|n| matches!(n, ValueNode::Separator(v) if v.trim().contains(',')))
+                            && let Some(first) = children.get(sep + 1)
+                        {
+                            replacement = Some(first.clone_in(alloc));
+                        }
+                    } else if *requires
+                        && let Some(ValueNode::Word(space)) = colorspace(children)
+                        && matches!(*space, "oklab" | "oklch" | "lab" | "lch")
                     {
-                        replacement = Some(first.clone_in(alloc));
+                        *space = "srgb";
                     }
-                } else if *requires
-                    && let Some(ValueNode::Word(space)) = children.get_mut(2)
-                    && matches!(*space, "oklab" | "oklch" | "lab" | "lch")
-                {
-                    *space = "srgb";
                 }
                 if replacement.is_none() {
                     polyfill_nodes(children, theme, requires, alloc);

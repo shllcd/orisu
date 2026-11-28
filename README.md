@@ -1,7 +1,7 @@
 # orisu
 
 A Tailwind CSS 4 engine written in Rust. The goal is a drop-in replacement: the same CSS byte for byte as
-Tailwind 4.3.4, with less work on every step that matters while you are developing: compile, build, HMR,
+Tailwind 4.3.5, with less work on every step that matters while you are developing: compile, build, HMR,
 class canonicalization and `cn`.
 
 ```sh

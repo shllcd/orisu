@@ -9,9 +9,18 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 
 ## [Unreleased]
 
+### Changed
+
+- Output and canonicalization follow Tailwind 4.3.5.
+
 ### Removed
 
 - Removed `mangle` option of the Vite plugin.
+
+### Fixed
+
+- `color-mix(…)` without a color interpolation method gets no fallback, and one with leading whitespace or a comment in its arguments uses the right fallback color and the `srgb` color space.
+- `<!--` and `-->` between top-level rules are ignored instead of failing to parse or swallowing the next rule.
 
 ## [0.5.0] - 2026-11-08
 
