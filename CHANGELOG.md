@@ -20,6 +20,7 @@ The release workflow derives the version from them: `Breaking` or `Removed` bump
 ### Fixed
 
 - `color-mix(…)` without a color interpolation method gets no fallback, and one with leading whitespace or a comment in its arguments uses the right fallback color and the `srgb` color space.
+- `theme(boxShadow.sm)` and other legacy paths into a namespace with a `DEFAULT` value resolve to the CSS theme instead of the v3 default.
 - `<!--` and `-->` between top-level rules are ignored instead of failing to parse or swallowing the next rule.
 
 ## [0.5.0] - 2026-11-08

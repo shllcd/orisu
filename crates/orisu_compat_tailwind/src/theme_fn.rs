@@ -164,6 +164,7 @@ impl Resolver<'_, '_> {
     }
 
     fn resolve(&self, keypath: Vec<String>) -> Value {
+        let specific_key = keypath.len() > 1;
         let (mut css, options) = self.read_from_css(&keypath);
         let mut config = self.get(None, keypath).unwrap_or(Value::Null);
         if let Value::Str(s) = &mut config {
@@ -228,7 +229,8 @@ impl Resolver<'_, '_> {
             return Value::Arr(vec![base, extra]);
         }
 
-        if let Value::Obj(map) = &css
+        if specific_key
+            && let Value::Obj(map) = &css
             && let Some(default) = map.get("DEFAULT")
         {
             return default.clone();
@@ -292,7 +294,7 @@ impl Resolver<'_, '_> {
             options_obj.insert(key.unwrap_or("DEFAULT").to_owned(), value);
         }
 
-        if path.last().is_some_and(|p| p == "DEFAULT") || (obj.len() == 1 && obj.contains_key("DEFAULT")) {
+        if path.last().is_some_and(|p| p == "DEFAULT") || (path.len() > 1 && obj.len() == 1 && obj.contains_key("DEFAULT")) {
             let value = obj.swap_remove("DEFAULT").unwrap_or(Value::Null);
             return (value, options_obj.swap_remove("DEFAULT").unwrap_or(Value::Num(opts::NONE)));
         }
